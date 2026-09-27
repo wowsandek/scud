@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Beat-synced travel reel renderer (1080x1920, 30 fps).
+"""Beat-synced travel reel renderer (1080x1920, 30 fps) — motion-design edition.
 
-Reads 1080x1920 proxies of the source clips, cuts them on a 120 BPM grid,
-adds transitions (zoom punch, whip pan, spin, glitch, light leak), beat
-pulses, animated location labels and an end card, then encodes the video
-and muxes it with music + synthesized whoosh/boom SFX.
+Cuts 1080x1920 proxies of the source clips on a 120 BPM grid and adds:
+  * transitions: zoom punch, whip pan, spin, light leak (+ chromatic split)
+  * "text behind the scene": big serif titles composited under hills,
+    cliffs and buildings using a SegFormer sky mask (see sky.py)
+  * per-letter blur-in reveals, tracking animation, scramble-decoded
+    monospace metadata, hairlines, chapter tags with local time
+  * beat pulses, vignette, film grain
+Audio: music segment + synthesized whooshes / booms on the cuts.
 
 Usage: python3 render.py <work_dir>
-  work_dir must contain proxy/c1..c5.mp4, music/823.wav, fonts/*.ttf
+  work_dir must contain proxy/c1..c5.mp4, music/823.wav, fonts/*.ttf,
+  models/segformer_b2.onnx
 """
 import math
 import os
@@ -20,6 +25,9 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from scipy import signal
 from scipy.io import wavfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sky import SkySegmenter  # noqa: E402
+
 WORK = sys.argv[1] if len(sys.argv) > 1 else "."
 OUT = os.path.join(WORK, "out")
 os.makedirs(OUT, exist_ok=True)
@@ -31,197 +39,487 @@ NFRAMES = int(DUR * FPS)
 MUSIC_START = 50.1336  # track time of reel t=0 (bar start, drop lands at t=4.0)
 SR = 44100
 
-ACCENT = (255, 154, 31)  # apricot orange (RGB)
-DARK = (17, 17, 17)
 WHITE = (255, 255, 255)
+SHADOW = (8, 12, 20)
 
-GRADE = ("eq=contrast=1.08:saturation=1.25:gamma=0.97,"
+GRADE = ("eq=contrast=1.07:saturation=1.18:gamma=0.97,"
          "colorbalance=rs=-0.02:bs=0.03:rh=0.03:bh=-0.02,"
-         "unsharp=5:5:0.5")
+         "unsharp=5:5:0.4")
+
+F_SERIF = "PlayfairItalic.ttf"
+F_SANS = "Inter.ttf"
+F_MONO = "JetBrainsMono.ttf"
 
 # ---------------------------------------------------------------- edit list
 # clip, source in-point, reel start, reel duration, speed ramp [(dur, speed)]
 SEGMENTS = [
-    # intro (build-up, title on screen)
-    ("c4", 0.30, 0.0, 2.0, [(2.0, 1.0)]),
-    ("c3", 23.0, 2.0, 2.0, [(1.5, 1.0), (0.5, 1.6)]),
-    # 01 Garni  (drop at 4.0)
-    ("c1", 0.50, 4.0, 1.0, [(1.0, 1.5)]),
-    ("c1", 4.60, 5.0, 1.0, [(1.0, 1.5)]),
-    ("c1", 7.60, 6.0, 1.0, [(1.0, 1.0)]),
-    ("c1", 12.6, 7.0, 1.0, [(1.0, 1.2)]),
-    # 02 Sevan beach
-    ("c2", 1.60, 8.0, 1.5, [(1.5, 1.3)]),
+    ("c4", 0.30, 0.0, 2.0, [(2.0, 1.0)]),            # intro: Sevan from above
+    ("c3", 23.0, 2.0, 2.0, [(1.5, 1.0), (0.5, 1.6)]),  # intro: jet ski, sun
+    ("c1", 7.45, 4.0, 1.5, [(1.5, 1.0)]),            # 01 Garni — title behind the cliff
+    ("c1", 0.50, 5.5, 1.0, [(1.0, 1.5)]),
+    ("c1", 4.60, 6.5, 0.5, [(0.5, 1.5)]),
+    ("c1", 13.0, 7.0, 1.0, [(1.0, 1.2)]),
+    ("c2", 1.60, 8.0, 1.5, [(1.5, 1.3)]),            # 02 Sevan — title in the sky
     ("c2", 17.0, 9.5, 1.5, [(1.5, 1.0)]),
-    # 03 jet ski
-    ("c3", 12.8, 11.0, 1.5, [(1.5, 1.5)]),
+    ("c3", 12.8, 11.0, 1.5, [(1.5, 1.5)]),           # 03 jet ski
     ("c3", 26.6, 12.5, 1.0, [(1.0, 1.5)]),
     ("c3", 41.0, 13.5, 2.5, [(0.5, 2.0), (1.5, 0.5), (0.5, 2.0)]),
-    # 04 Sevanavank
-    ("c2", 12.2, 16.0, 1.5, [(1.5, 1.0)]),
-    ("c4", 11.3, 17.5, 1.5, [(1.5, 1.0)]),
+    ("c4", 11.35, 16.0, 2.0, [(2.0, 0.75)]),         # 04 Sevanavank — title behind the church
+    ("c2", 12.4, 18.0, 1.0, [(1.0, 1.2)]),
     ("c4", 4.50, 19.0, 1.0, [(1.0, 1.5)]),
-    # finale panoramas
-    ("c5", 3.20, 20.0, 2.0, [(2.0, 1.25)]),
-    ("c5", 15.4, 22.0, 2.5, [(2.5, 1.0)]),
-    # end card background (slow-mo)
-    ("c5", 17.95, 24.5, 3.0, [(3.0, 0.45)]),
+    ("c5", 15.4, 20.0, 2.0, [(2.0, 1.0)]),           # 05 peninsula
+    ("c5", 17.4, 22.0, 2.5, [(2.5, 0.78)]),
+    ("c5", 3.00, 24.5, 3.0, [(3.0, 0.9)]),           # end card — title behind the ridge
 ]
 
-# transition at each cut time
 TRANSITIONS = {
-    2.0: ("zoomsoft",),
-    4.0: ("zoom", True),        # the drop: zoom punch + flash
-    5.0: ("whip", (0, -1)),
-    6.0: ("whip", (-1, 0)),
-    7.0: ("zoom", False),
-    8.0: ("spin",),
-    9.5: ("whip", (-1, 0)),
-    11.0: ("glitch",),
-    12.5: ("whip", (1, 0)),
-    13.5: ("zoom", False),
-    16.0: ("zoom", True),
-    17.5: ("whip", (0, -1)),
-    19.0: ("whip", (-1, 0)),
-    20.0: ("leak",),
-    22.0: ("whip", (-1, 0)),
-    24.5: ("glitch",),
+    2.0: dict(kind="zoom", amp=0.25, n=(3, 3)),
+    4.0: dict(kind="zoom", amp=0.55, n=(4, 5), flash=0.7, shake=1.0),
+    5.5: dict(kind="whip", dir=(0, -1)),
+    6.5: dict(kind="whip", dir=(-1, 0)),
+    7.0: dict(kind="zoom", amp=0.4, n=(3, 4), shake=0.4),
+    8.0: dict(kind="spin"),
+    9.5: dict(kind="whip", dir=(-1, 0)),
+    11.0: dict(kind="zoom", amp=0.5, n=(4, 4), shake=0.6),
+    12.5: dict(kind="whip", dir=(1, 0)),
+    13.5: dict(kind="zoom", amp=0.4, n=(3, 4), shake=0.5),
+    16.0: dict(kind="zoom", amp=0.5, n=(4, 5), flash=0.35, shake=0.8),
+    18.0: dict(kind="whip", dir=(0, -1)),
+    19.0: dict(kind="whip", dir=(-1, 0)),
+    20.0: dict(kind="leak"),
+    22.0: dict(kind="whip", dir=(-1, 0)),
+    24.5: dict(kind="leak"),
 }
 
-LABELS = [
-    # start, end, number, name, subtitle
-    (4.0, 8.0, "01", "ГАРНИ", "Симфония камней"),
-    (8.0, 11.0, "02", "СЕВАН", "озеро на высоте 1900 м"),
-    (11.0, 16.0, "03", "ГИДРОЦИКЛ", "по волнам Севана"),
-    (16.0, 20.0, "04", "СЕВАНАВАНК", "монастырь IX века"),
+# big serif titles living "in the scene" (under transitions); depth => behind non-sky
+TITLES = [
+    dict(text="Гарни", start=4.05, end=5.5, size=250, depth=True),
+    dict(text="Севан", start=8.05, end=9.5, size=250, depth=True),
+    dict(text="Севанаванк", start=16.05, end=18.0, size=190, depth=True),
+    dict(text="Армения", start=24.6, end=27.5, size=235, depth=True, punch=26.0),
+]
+
+CHAPTERS = [
+    dict(start=4.15, end=7.92, num="01", time="11:56", title="ГАРНИ · СИМФОНИЯ КАМНЕЙ",
+         coords="40.11° N  44.73° E"),
+    dict(start=8.15, end=10.92, num="02", time="14:50", title="ОЗЕРО СЕВАН · 1900 М",
+         coords="40.55° N  45.00° E"),
+    dict(start=11.15, end=15.92, num="03", time="15:26", title="ГИДРОЦИКЛ ПО СЕВАНУ", coords=None),
+    dict(start=16.15, end=19.92, num="04", time="16:03", title="СЕВАНАВАНК · IX ВЕК",
+         coords="40.56° N  45.01° E"),
+    dict(start=20.15, end=24.42, num="05", time="16:22", title="ПОЛУОСТРОВ СЕВАН", coords=None),
 ]
 
 
-# ---------------------------------------------------------------- helpers
+# ---------------------------------------------------------------- easing
 def clamp(x, a=0.0, b=1.0):
     return max(a, min(b, x))
 
 
-def ease_out_cubic(p):
+def expo_out(p):
+    p = clamp(p)
+    return 1.0 if p >= 1 else 1 - 2 ** (-10 * p)
+
+
+def cubic_out(p):
     p = clamp(p)
     return 1 - (1 - p) ** 3
 
 
-def ease_in_cubic(p):
-    p = clamp(p)
-    return p ** 3
+def cubic_in(p):
+    return clamp(p) ** 3
 
 
-def ease_out_back(p, s=1.9):
-    p = clamp(p) - 1
-    return 1 + (s + 1) * p ** 3 + s * p ** 2
+# ---------------------------------------------------------------- fonts / glyphs
+_font_cache = {}
 
 
-def font(name, size, weight=900):
-    f = ImageFont.truetype(os.path.join(WORK, "fonts", name), size)
-    f.set_variation_by_axes([weight])
-    return f
+def font(name, size, axes):
+    key = (name, size, tuple(axes))
+    if key not in _font_cache:
+        f = ImageFont.truetype(os.path.join(WORK, "fonts", name), size)
+        f.set_variation_by_axes(list(axes))
+        _font_cache[key] = f
+    return _font_cache[key]
 
 
-def text_sprite(text, fnt, fill=WHITE, shadow=0.55, tracking=0, trim_y=True):
-    """Render text to a BGRA uint8 sprite with a soft drop shadow."""
-    widths = [fnt.getlength(ch) for ch in text]
-    tw = int(sum(widths) + tracking * max(0, len(text) - 1))
+def serif(size):
+    return font(F_SERIF, size, [500])
+
+
+def sans(size, weight=600):
+    return font(F_SANS, size, [min(32, max(14, size)), weight])
+
+
+def mono(size, weight=500):
+    return font(F_MONO, size, [weight])
+
+
+def glyph_sprite(ch, fnt, fill=WHITE, shadow=0.0, shadow_blur=14, pad=None):
+    """One glyph as straight-alpha BGRA float32, fixed box (asc+desc) so baselines align.
+    Returns sprite and the x of the pen origin inside the sprite."""
     asc, desc = fnt.getmetrics()
-    pad = 40
-    w, h = tw + 2 * pad, asc + desc + 2 * pad
-    mask = Image.new("L", (w, h), 0)
-    d = ImageDraw.Draw(mask)
-    x = pad
-    for ch, cw in zip(text, widths):
-        d.text((x, pad), ch, font=fnt, fill=255)
-        x += cw + tracking
-    return compose_sprite(mask, fill, shadow, trim_y)
-
-
-def compose_sprite(mask, fill, shadow, trim_y=True):
-    w, h = mask.size
-    m = np.asarray(mask, np.float32) / 255
+    pad = pad if pad is not None else int(fnt.size * 0.45)
+    adv = fnt.getlength(ch)
+    w, h = int(adv + 2 * pad), asc + desc + 2 * pad
+    m = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(m).text((pad, pad), ch, font=fnt, fill=255)
+    a = np.asarray(m, np.float32) / 255
     if shadow > 0:
-        sh = np.asarray(mask.filter(ImageFilter.GaussianBlur(10)), np.float32) / 255
-        sh = np.roll(sh, 6, axis=0) * shadow
+        sh = np.asarray(m.filter(ImageFilter.GaussianBlur(shadow_blur)), np.float32) / 255 * shadow
+        sh = np.roll(sh, int(shadow_blur * 0.3), axis=0)
     else:
-        sh = np.zeros_like(m)
-    a = m + sh * (1 - m)
-    col = np.zeros((h, w, 3), np.float32)
-    rgb = np.array(fill[::-1], np.float32)  # to BGR
-    with np.errstate(invalid="ignore", divide="ignore"):
-        col[:] = rgb * (m / np.maximum(a, 1e-6))[..., None]
-    out = np.dstack([col, a * 255]).clip(0, 255).astype(np.uint8)
-    return trim(out, trim_y=trim_y)
+        sh = np.zeros_like(a)
+    alpha = a + sh * (1 - a)
+    col = np.empty((h, w, 3), np.float32)
+    fg = np.array(fill[::-1], np.float32)
+    bg = np.array(SHADOW[::-1], np.float32)
+    wf = (a / np.maximum(alpha, 1e-6))[..., None]
+    col[:] = fg * wf + bg * (1 - wf)
+    return np.dstack([col, alpha * 255]), pad
 
 
-def trim(spr, keep=2, trim_y=True):
-    ys, xs = np.nonzero(spr[..., 3] > 0)
-    if len(xs) == 0:
-        return spr
-    y0, y1 = max(0, ys.min() - keep), min(spr.shape[0], ys.max() + keep + 1)
-    if not trim_y:
-        y0, y1 = 0, spr.shape[0]
-    x0, x1 = max(0, xs.min() - keep), min(spr.shape[1], xs.max() + keep + 1)
-    return spr[y0:y1, x0:x1].copy()
+class Word:
+    """A line of text laid out glyph by glyph, drawable with per-glyph transforms."""
+
+    def __init__(self, text, fnt, fill=WHITE, shadow=0.0, tracking=0.0, shadow_blur=14):
+        self.text = text
+        self.fnt = fnt
+        self.glyphs, self.adv = [], []
+        for ch in text:
+            spr, pad = glyph_sprite(ch, fnt, fill, shadow, shadow_blur)
+            self.glyphs.append((spr, pad))
+            self.adv.append(fnt.getlength(ch))
+        self.tracking = tracking
+        self.asc, self.desc = fnt.getmetrics()
+        self._blur_cache = {}
+
+    def width(self, tracking=None):
+        tr = self.tracking if tracking is None else tracking
+        return sum(self.adv) + tr * (len(self.text) - 1)
+
+    def origins(self, x_left, tracking=None):
+        tr = self.tracking if tracking is None else tracking
+        xs, x = [], x_left
+        for a in self.adv:
+            xs.append(x)
+            x += a + tr
+        return xs
+
+    def blurred(self, i, sigma):
+        s = round(sigma * 2) / 2
+        if s < 0.5:
+            return self.glyphs[i][0]
+        key = (i, s)
+        if key not in self._blur_cache:
+            self._blur_cache[key] = cv2.GaussianBlur(self.glyphs[i][0], (0, 0), s)
+        return self._blur_cache[key]
 
 
-def rounded_rect_sprite(w, h, r, fill):
-    img = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(img).rounded_rectangle([0, 0, w - 1, h - 1], r, fill=255)
-    m = np.asarray(img, np.float32)
-    col = np.zeros((h, w, 3), np.float32)
-    col[:] = np.array(fill[::-1], np.float32)
-    return np.dstack([col, m]).astype(np.uint8)
+# ---------------------------------------------------------------- layers
+class Layer:
+    """Premultiplied RGBA accumulation buffer with a dirty rectangle."""
 
+    def __init__(self):
+        self.C = np.zeros((H, W, 3), np.float32)
+        self.A = np.zeros((H, W), np.float32)
+        self.box = None
 
-def pin_sprite(size, fill):
-    s = size * 4
-    img = Image.new("L", (s, int(s * 1.35)), 0)
-    d = ImageDraw.Draw(img)
-    r = s // 2
-    d.ellipse([0, 0, s - 1, s - 1], fill=255)
-    d.polygon([(s * 0.12, r * 1.35), (s * 0.88, r * 1.35), (s / 2, s * 1.33)], fill=255)
-    d.ellipse([r * 0.55, r * 0.55, s - r * 0.55, s - r * 0.55], fill=0)
-    img = img.resize((size, int(size * 1.35)), Image.LANCZOS)
-    return compose_sprite(img, fill, 0.45)
+    def _grow(self, x0, y0, x1, y1):
+        if self.box is None:
+            self.box = [x0, y0, x1, y1]
+        else:
+            b = self.box
+            self.box = [min(b[0], x0), min(b[1], y0), max(b[2], x1), max(b[3], y1)]
 
+    def _blend(self, X0, Y0, X1, Y1, rgb, a):
+        self.C[Y0:Y1, X0:X1] = self.C[Y0:Y1, X0:X1] * (1 - a[..., None]) + rgb * a[..., None]
+        self.A[Y0:Y1, X0:X1] = self.A[Y0:Y1, X0:X1] * (1 - a) + a
+        self._grow(X0, Y0, X1, Y1)
 
-def blit(dst, spr, x, y, alpha=1.0, scale=1.0, anchor=(0.5, 0.5), clip=None):
-    if alpha <= 0.004 or spr is None:
-        return
-    if abs(scale - 1.0) > 1e-3:
-        if scale <= 0.02:
+    def draw(self, spr, x0, y0, alpha=1.0, scale=1.0):
+        """Draw a straight-alpha float sprite with its top-left at (x0, y0) (after scaling)."""
+        if alpha <= 0.003:
             return
-        interp = cv2.INTER_LINEAR if scale > 1 else cv2.INTER_AREA
-        spr = cv2.resize(spr, None, fx=scale, fy=scale, interpolation=interp)
-    h, w = spr.shape[:2]
-    x0 = int(round(x - anchor[0] * w))
-    y0 = int(round(y - anchor[1] * h))
-    X0, Y0, X1, Y1 = max(0, x0), max(0, y0), min(W, x0 + w), min(H, y0 + h)
-    if clip:
-        X0, Y0 = max(X0, int(clip[0])), max(Y0, int(clip[1]))
-        X1, Y1 = min(X1, int(clip[2])), min(Y1, int(clip[3]))
-    if X1 <= X0 or Y1 <= Y0:
-        return
-    s = spr[Y0 - y0:Y1 - y0, X0 - x0:X1 - x0].astype(np.float32)
-    a = s[..., 3:4] / 255.0 * alpha
-    d = dst[Y0:Y1, X0:X1, :3].astype(np.float32)
-    dst[Y0:Y1, X0:X1, :3] = (d * (1 - a) + s[..., :3] * a).astype(np.uint8)
+        if abs(scale - 1) > 1e-3:
+            if scale < 0.03:
+                return
+            spr = cv2.resize(spr, None, fx=scale, fy=scale,
+                             interpolation=cv2.INTER_LINEAR if scale > 1 else cv2.INTER_AREA)
+        h, w = spr.shape[:2]
+        x0, y0 = int(round(x0)), int(round(y0))
+        X0, Y0, X1, Y1 = max(0, x0), max(0, y0), min(W, x0 + w), min(H, y0 + h)
+        if X1 <= X0 or Y1 <= Y0:
+            return
+        s = spr[Y0 - y0:Y1 - y0, X0 - x0:X1 - x0]
+        self._blend(X0, Y0, X1, Y1, s[..., :3], s[..., 3] / 255 * alpha)
+
+    def _shape(self, draw_fn, bx0, by0, bx1, by1, alpha):
+        bx0, by0 = max(0, int(bx0)), max(0, int(by0))
+        bx1, by1 = min(W, int(bx1)), min(H, int(by1))
+        if bx1 <= bx0 or by1 <= by0:
+            return
+        m = np.zeros((by1 - by0, bx1 - bx0), np.uint8)
+        draw_fn(m, bx0, by0)
+        self._blend(bx0, by0, bx1, by1, 255.0, m.astype(np.float32) / 255 * alpha)
+
+    def line(self, x0, y0, x1, y1, alpha=1.0, thick=2):
+        if alpha <= 0.003 or (abs(x1 - x0) < 1 and abs(y1 - y0) < 1):
+            return
+        s = 16  # sub-pixel precision for cv2 drawing
+
+        def fn(m, ox, oy):
+            cv2.line(m, (int((x0 - ox) * s), int((y0 - oy) * s)), (int((x1 - ox) * s), int((y1 - oy) * s)),
+                     255, thick, cv2.LINE_AA, 4)
+        self._shape(fn, min(x0, x1) - thick - 2, min(y0, y1) - thick - 2,
+                    max(x0, x1) + thick + 3, max(y0, y1) + thick + 3, alpha)
+
+    def dot(self, x, y, r, alpha=1.0):
+        if alpha <= 0.003 or r <= 0.3:
+            return
+
+        def fn(m, ox, oy):
+            cv2.circle(m, (int((x - ox) * 16), int((y - oy) * 16)), int(r * 16), 255, -1, cv2.LINE_AA, 4)
+        self._shape(fn, x - r - 2, y - r - 2, x + r + 3, y + r + 3, alpha)
+
+    def composite(self, frame, mask=None):
+        if self.box is None:
+            return frame
+        x0, y0, x1, y1 = self.box
+        A = self.A[y0:y1, x0:x1]
+        C = self.C[y0:y1, x0:x1]
+        if mask is not None:
+            m = mask[y0:y1, x0:x1]
+            A = A * m
+            C = C * m[..., None]
+        f = frame[y0:y1, x0:x1].astype(np.float32)
+        frame[y0:y1, x0:x1] = (f * (1 - A[..., None]) + C).clip(0, 255).astype(np.uint8)
+        self.C[y0:y1, x0:x1] = 0
+        self.A[y0:y1, x0:x1] = 0
+        self.box = None
+        return frame
 
 
-def affine(img, scale=1.0, angle=0.0, dx=0.0, dy=0.0, border=cv2.BORDER_REFLECT101):
+# ---------------------------------------------------------------- text animators
+def draw_blur_in(layer, word, cx, cy, t, t0, stagger=0.06, dur=0.6, sigma0=18, rise=46,
+                 spread=26, scale=1.0, alpha=1.0, exit_t=None, exit_dur=0.3):
+    """Glyphs fade in from blur, rising and converging; optional blur-out exit.
+    (cx, cy) is the centre of the x-height band."""
+    n = len(word.text)
+    width = word.width()
+    xs = word.origins(cx - width / 2)
+    base = cy + (word.asc * 0.62) / 2  # baseline so that the x-height is centred on cy
+    for i, ch in enumerate(word.text):
+        if ch == " ":
+            continue
+        p = expo_out((t - t0 - i * stagger) / dur)
+        if p <= 0:
+            continue
+        sigma = sigma0 * (1 - p)
+        a = min(1.0, p * 1.3) * alpha
+        dy = rise * (1 - p)
+        dx = (i - (n - 1) / 2) * spread * (1 - p)
+        if exit_t is not None and t > exit_t:
+            q = cubic_in((t - exit_t - i * 0.02) / exit_dur)
+            sigma += 20 * q
+            a *= 1 - q
+            dy -= 30 * q
+        spr = word.blurred(i, sigma)
+        pad = word.glyphs[i][1]
+        # glyph box top-left before scaling, then scale about (cx, cy)
+        gx = xs[i] - pad + dx
+        gy = base - word.asc - pad + dy
+        layer.draw(spr, cx + (gx - cx) * scale, cy + (gy - cy) * scale, a, scale)
+
+
+class Scramble:
+    """Monospace text that decodes from random characters, left to right."""
+    POOL = "0123456789#%&*+=/<>"
+
+    def __init__(self, text, fnt, fill=WHITE, shadow=0.45):
+        self.text = text
+        self.fnt = fnt
+        self.adv = fnt.getlength("0")
+        self.cache = {}
+        self.fill, self.shadow = fill, shadow
+        self.asc, self.desc = fnt.getmetrics()
+
+    def sprite(self, ch):
+        if ch not in self.cache:
+            self.cache[ch] = glyph_sprite(ch, self.fnt, self.fill, self.shadow, 6, pad=12)
+        return self.cache[ch]
+
+    def draw(self, layer, x, y, t, t0, fi, alpha=1.0, anchor="left", per=0.022):
+        """y is the baseline."""
+        if t < t0:
+            return
+        width = self.adv * len(self.text)
+        x0 = x - (width / 2 if anchor == "center" else 0)
+        rng = np.random.default_rng(fi * 131 + len(self.text))
+        for i, ch in enumerate(self.text):
+            if ch == " ":
+                continue
+            appear = t0 + i * per * 0.5
+            reveal = t0 + 0.12 + i * per
+            if t < appear:
+                continue
+            c = ch if t >= reveal else self.POOL[rng.integers(len(self.POOL))]
+            spr, pad = self.sprite(c)
+            layer.draw(spr, x0 + i * self.adv - pad, y - self.asc - pad,
+                       alpha * (1.0 if t >= reveal else 0.55))
+
+
+def draw_type_on(layer, word, x, y, t, t0, alpha=1.0, per=0.016, dur=0.35, anchor="left"):
+    """Tracked caps line: glyphs fade/slide in one after another. y is the baseline."""
+    width = word.width()
+    x0 = x - (width / 2 if anchor == "center" else 0)
+    xs = word.origins(x0)
+    for i, ch in enumerate(word.text):
+        if ch == " ":
+            continue
+        p = expo_out((t - t0 - i * per) / dur)
+        if p <= 0:
+            continue
+        spr, pad = word.glyphs[i]
+        layer.draw(spr, xs[i] - pad, y - word.asc - pad + 14 * (1 - p), alpha * p)
+
+
+# ---------------------------------------------------------------- graphics blocks
+class Title:
+    def __init__(self, spec):
+        self.spec = spec
+        size = spec["size"]
+        self.word = Word(spec["text"], serif(size), WHITE, shadow=0.38, tracking=size * 0.01,
+                         shadow_blur=int(size * 0.09))
+        self.pos = None  # (cx, cy), decided by place_titles()
+
+    def alive(self, t):
+        return self.spec["start"] <= t < self.spec["end"]
+
+    def draw(self, layer, t):
+        s = self.spec
+        life = (t - s["start"]) / (s["end"] - s["start"])
+        scale = 1.0 + 0.04 * life
+        if s.get("punch") and t >= s["punch"]:
+            scale *= 1 + 0.05 * math.exp(-(t - s["punch"]) / 0.15)
+        draw_blur_in(layer, self.word, self.pos[0], self.pos[1], t, s["start"],
+                     stagger=0.055, dur=0.65, scale=scale)
+
+    def alpha_footprint(self):
+        """Final-state alpha (without shadow halo) and its offset from the centre point."""
+        lay = Layer()
+        draw_blur_in(lay, self.word, W / 2, H / 2, 99, 0)
+        x0, y0, x1, y1 = lay.box
+        a = lay.A[y0:y1, x0:x1].copy()
+        a = np.where(a > 0.6, a, 0)
+        lay.composite(np.zeros((H, W, 3), np.uint8))
+        return a, x0 - W / 2, y0 - H / 2
+
+
+class Chapter:
+    X = 72
+    Y = 1262
+
+    def __init__(self, spec):
+        self.spec = spec
+        self.head = Scramble(f"{spec['num']} — {spec['time']}", mono(30, 500), WHITE, 0.5)
+        self.title = Word(spec["title"], sans(30, 600), WHITE, shadow=0.5, tracking=4.5, shadow_blur=6)
+        self.coords = Scramble(spec["coords"], mono(25, 400), WHITE, 0.5) if spec["coords"] else None
+
+    def visibility(self, t):
+        s = self.spec
+        if not (s["start"] - 0.1 <= t < s["end"]):
+            return 0.0
+        return clamp((t - s["start"] + 0.1) / 0.3) * (1 - clamp((t - (s["end"] - 0.22)) / 0.22))
+
+    def draw(self, layer, t, fi):
+        s = self.spec
+        if not (s["start"] <= t < s["end"]):
+            return
+        out = clamp((t - (s["end"] - 0.22)) / 0.22)
+        a = 1 - cubic_in(out)
+        x = self.X - 24 * cubic_in(out)
+        y = self.Y
+        self.head.draw(layer, x, y, t, s["start"], fi, 0.92 * a)
+        lp = expo_out((t - s["start"] - 0.1) / 0.6)
+        layer.line(x, y + 26, x + 210 * lp, y + 26, 0.75 * a, 2)
+        draw_type_on(layer, self.title, x, y + 78, t, s["start"] + 0.12, a)
+        if self.coords:
+            self.coords.draw(layer, x, y + 124, t, s["start"] + 0.3, fi, 0.72 * a, per=0.018)
+
+
+class Intro:
+    def __init__(self):
+        self.kicker = Word("ОДИН ДЕНЬ", sans(34, 500), WHITE, shadow=0.5, tracking=14, shadow_blur=8)
+        f = serif(186)
+        while f.getlength("в Армении") > 900:
+            f = serif(f.size - 6)
+        self.title = Word("в Армении", f, WHITE, shadow=0.42, tracking=2, shadow_blur=16)
+        self.date = Scramble("27.09.2026", mono(28, 500), WHITE, 0.5)
+
+    def draw(self, layer, t, fi):
+        if t >= 4.0:
+            return
+        fade = 1 - clamp((t - 3.5) / 0.35)
+        # kicker with tracking that tightens, flanked by growing hairlines
+        kp = expo_out((t - 0.05) / 0.9)
+        tr = 40 - 26 * kp
+        width = self.kicker.width(tr)
+        xs = self.kicker.origins(W / 2 - width / 2, tr)
+        ky = 760
+        for i, (spr, pad) in enumerate(self.kicker.glyphs):
+            if self.kicker.text[i] != " ":
+                layer.draw(spr, xs[i] - pad, ky - self.kicker.asc - pad, clamp(kp * 1.4) * fade)
+        lp = expo_out((t - 0.3) / 0.8)
+        gap, ln = 26, 110 * lp
+        ly = ky - 13
+        layer.line(W / 2 - width / 2 - gap - ln, ly, W / 2 - width / 2 - gap, ly, 0.8 * fade, 2)
+        layer.line(W / 2 + width / 2 + gap, ly, W / 2 + width / 2 + gap + ln, ly, 0.8 * fade, 2)
+        # big serif line; grows slowly, blurs out into the drop
+        scale = 1 + 0.05 * clamp(t / 3.5)
+        draw_blur_in(layer, self.title, W / 2, 890, t, 0.35, stagger=0.06, dur=0.7, scale=scale,
+                     exit_t=3.55, exit_dur=0.4)
+        self.date.draw(layer, W / 2, 1060, t, 1.0, fi, 0.85 * fade, anchor="center")
+
+
+class EndCard:
+    def __init__(self):
+        self.stops = [("ГАРНИ", 190), ("СЕВАН", 540), ("СЕВАНАВАНК", 890)]
+        self.names = [Word(n, sans(24, 600), WHITE, 0.5, tracking=4, shadow_blur=6) for n, _ in self.stops]
+        self.cta = Word("СОХРАНИ, ЧТОБЫ НЕ ПОТЕРЯТЬ", sans(28, 500), WHITE, 0.5, tracking=7, shadow_blur=6)
+
+    def draw(self, layer, t):
+        if t < 24.9:
+            return
+        y = 1215
+        x0, x1 = self.stops[0][1], self.stops[-1][1]
+        lp = cubic_out((t - 25.0) / 1.0)
+        if lp > 0:
+            layer.line(x0, y, x0 + (x1 - x0) * lp, y, 0.8, 2)
+        for i, (name, x) in enumerate(self.stops):
+            reach = (x - x0) / (x1 - x0)
+            t_reach = 25.0 + 1 - (1 - reach) ** (1 / 3)
+            p = expo_out((t - t_reach + 0.04) / 0.4)
+            if p > 0:
+                layer.dot(x, y, 7 * p + 3 * math.exp(-max(0, t - t_reach) / 0.12))
+                draw_type_on(layer, self.names[i], x, y + 52, t, t_reach, 1.0, per=0.012, anchor="center")
+        if t > 26.1:
+            draw_type_on(layer, self.cta, W / 2, 1370, t, 26.1, 0.95, per=0.02, anchor="center")
+            half = self.cta.width() / 2 * expo_out((t - 26.1) / 0.8)
+            layer.line(W / 2 - half, 1392, W / 2 + half, 1392, 0.6, 2)
+
+
+# ---------------------------------------------------------------- frame fx
+def affine(img, scale=1.0, angle=0.0, dx=0.0, dy=0.0):
     if abs(scale - 1) < 1e-4 and abs(angle) < 1e-4 and abs(dx) < 0.5 and abs(dy) < 0.5:
         return img
     M = cv2.getRotationMatrix2D((W / 2, H / 2), angle, scale)
     M[0, 2] += dx
     M[1, 2] += dy
-    return cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=border)
+    return cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT101)
 
 
 def zoom_blur(img, scale, amount, n=6):
-    """Radial blur: average copies scaled between scale and scale*(1+amount)."""
     if amount < 0.004:
         return affine(img, scale)
     acc = np.zeros((H, W, 3), np.float32)
@@ -248,33 +546,112 @@ def rgb_split(img, px):
     return out
 
 
-def glitch(img, strength, seed):
-    rng = np.random.default_rng(seed)
-    out = img.copy()
-    for _ in range(int(6 + 10 * strength)):
-        y = rng.integers(0, H - 20)
-        hgt = int(rng.integers(8, 90))
-        sh = int(rng.normal(0, 90 * strength))
-        out[y:y + hgt] = np.roll(out[y:y + hgt], sh, axis=1)
-    return rgb_split(out, 18 * strength * (1 if rng.random() > 0.5 else -1))
-
-
-def flash(img, a, color=(255, 255, 255)):
+def flash(img, a):
     if a <= 0.004:
         return img
-    c = np.array(color, np.float32)
-    return (img.astype(np.float32) * (1 - a) + c * a).astype(np.uint8)
+    return (img.astype(np.float32) * (1 - a) + 255 * a).astype(np.uint8)
+
+
+def light_leak(t_rel):
+    yy, xx = np.mgrid[0:H:4, 0:W:4].astype(np.float32)
+    cx = W * (0.1 + 0.9 * t_rel)
+    cy = H * (0.35 - 0.15 * t_rel)
+    g = np.exp(-(((xx - cx) / (W * 0.55)) ** 2 + ((yy - cy) / (H * 0.45)) ** 2))
+    g = cv2.resize(g, (W, H))
+    return g[..., None] * (np.array([60, 150, 255], np.float32) / 255)
+
+
+def build_vignette():
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    r = np.sqrt(((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2)
+    return (1 - 0.3 * np.clip(r / 1.3, 0, 1) ** 2.4)[..., None]
+
+
+def build_bottom_shade():
+    y = np.linspace(0, 1, H, dtype=np.float32)
+    g = np.clip((y - 0.55) / 0.2, 0, 1) ** 1.4 * 0.45
+    g = g * np.clip((0.86 - y) / 0.1, 0.4, 1)
+    return g[:, None, None]
+
+
+VIGN = build_vignette()
+SHADE = build_bottom_shade()
+INTRO_BAND = (1 - 0.28 * np.exp(-((np.arange(H, dtype=np.float32) - 900) / 420) ** 2))[:, None, None]
+_grain_rng = np.random.default_rng(7)
+GRAIN = [cv2.resize(_grain_rng.normal(0, 4.2, (H // 2, W // 2)).astype(np.float32), (W, H))
+         for _ in range(6)]
+
+
+def transition_fx(frame, fi):
+    post = {"flash": 0.0, "rgb": 0.0, "shake": 0.0, "leak": None}
+    for cut, tr in TRANSITIONS.items():
+        k = fi - int(round(cut * FPS))  # <0 outgoing, >=0 incoming
+        kind = tr["kind"]
+        if kind == "zoom":
+            n_out, n_in = tr["n"]
+            amp = tr["amp"]
+            if -n_out <= k < 0:
+                p = (n_out + k + 1) / n_out
+                frame = zoom_blur(frame, 1 + amp * p ** 2, 0.18 * p)
+                post["rgb"] = max(post["rgb"], 10 * p)
+            elif 0 <= k < n_in:
+                q = 1 - k / n_in
+                frame = zoom_blur(frame, 1 + amp * 0.8 * q ** 2, 0.14 * q)
+                post["rgb"] = max(post["rgb"], 12 * q)
+                if tr.get("flash"):
+                    post["flash"] = max(post["flash"], tr["flash"] * [1, 0.55, 0.25, 0.1, 0][min(k, 4)])
+                if tr.get("shake"):
+                    post["shake"] = max(post["shake"], tr["shake"])
+        elif kind == "whip":
+            dx, dy = tr["dir"]
+            n, L = 3, (W if dx else H)
+            if -n <= k < 0:
+                p = (n + k + 1) / n
+                off = L * 0.45 * p ** 2
+                frame = motion_blur(affine(frame, 1.0, 0, dx * off, dy * off), dx * 260 * p, dy * 260 * p)
+            elif 0 <= k < n:
+                q = 1 - (k + 1) / (n + 1)
+                off = -L * 0.45 * q ** 2
+                frame = motion_blur(affine(frame, 1.0, 0, dx * off, dy * off), dx * 260 * q, dy * 260 * q)
+        elif kind == "spin":
+            n = 4
+            if -n <= k < 0:
+                p = (n + k + 1) / n
+                frame = zoom_blur(affine(frame, 1 + 0.25 * p, 55 * p ** 2), 1.0, 0.12 * p, 4)
+                post["rgb"] = max(post["rgb"], 8 * p)
+            elif 0 <= k < n:
+                q = 1 - k / n
+                frame = zoom_blur(affine(frame, 1 + 0.25 * q, -55 * q ** 2), 1.0, 0.12 * q, 4)
+                post["rgb"] = max(post["rgb"], 8 * q)
+        elif kind == "leak":
+            if 0 <= k < 16:
+                q = k / 16
+                frame = affine(frame, 1 + 0.2 * (1 - cubic_out(q)))
+                post["leak"] = (q, 0.85 * (1 - q) ** 1.5)
+                if k < 3:
+                    post["flash"] = max(post["flash"], [0.35, 0.15, 0.05][k])
+            elif -3 <= k < 0:
+                post["leak"] = (0.0, 0.3 * (4 + k) / 3)
+    return frame, post
+
+
+def beat_pulse(t):
+    if t < 4.0 or t >= 24.5:
+        return 1.0
+    b = math.floor(t / BEAT + 1e-6) * BEAT
+    strong = abs(b / 2.0 - round(b / 2.0)) < 1e-6
+    return 1 + (0.04 if strong else 0.022) * math.exp(-(t - b) / 0.11)
 
 
 # ---------------------------------------------------------------- sources
 class SegmentReader:
     def __init__(self, clip, src_in):
-        self.src_in = src_in
+        self.clip, self.src_in = clip, src_in
         path = os.path.join(WORK, "proxy", clip + ".mp4")
         self.proc = subprocess.Popen(
-            ["ffmpeg", "-v", "error", "-ss", f"{src_in:.3f}", "-i", path, "-vf", GRADE,
-             "-an", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
-            stdout=subprocess.PIPE, bufsize=W * H * 3 * 4)
+            ["ffmpeg", "-v", "error", "-ss", f"{src_in:.3f}", "-i", path, "-vf", GRADE, "-an",
+             "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=W * H * 3 * 4)
         self.idx = -1
         self.frame = None
 
@@ -283,10 +660,13 @@ class SegmentReader:
         while self.idx < want:
             buf = self.proc.stdout.read(W * H * 3)
             if len(buf) < W * H * 3:
-                break  # clip ended: hold the last frame
+                break
             self.frame = np.frombuffer(buf, np.uint8).reshape(H, W, 3)
             self.idx += 1
         return self.frame.copy()
+
+    def key(self):
+        return f"{self.clip}:{self.src_in:.3f}:{self.idx}"
 
     def close(self):
         self.proc.stdout.close()
@@ -305,328 +685,151 @@ def src_time(seg, lt):
     return t
 
 
-# ---------------------------------------------------------------- graphics
-F_HEAD = "Unbounded.ttf"
-F_BODY = "Montserrat.ttf"
+def seg_at(t):
+    return next(s for s in SEGMENTS if s[2] <= t + 1e-9 < s[2] + s[3])
 
 
-def fit_font(name, text, max_w, size, weight=900):
-    while size > 20:
-        f = font(name, size, weight)
-        if f.getlength(text) <= max_w:
-            return f
-        size -= 4
-    return font(name, size, weight)
-
-
-class Label:
-    def __init__(self, start, end, num, name, sub):
-        self.start, self.end = start, end
-        self.num = text_sprite(num, font(F_BODY, 40, 800), ACCENT, shadow=0.5)
-        self.name = text_sprite(name, fit_font(F_HEAD, name, 820, 112), WHITE, shadow=0.6)
-        self.pin = pin_sprite(46, ACCENT)
-        st = text_sprite(sub, font(F_BODY, 40, 700), DARK, shadow=0)
-        pw, ph = st.shape[1] + 56, st.shape[0] + 30
-        pill = rounded_rect_sprite(pw, ph, ph // 2, ACCENT)
-        blit(pill, st, pw / 2, ph / 2)
-        self.pill = pill
-
-    def draw(self, img, t):
-        lt = t - self.start
-        if lt < 0 or t >= self.end:
-            return
-        out_p = clamp((t - (self.end - 0.16)) / 0.16)
-        a = 1 - out_p
-        dx = -90 * ease_in_cubic(out_p)
-        x = 72 + dx
-        base_y = 1330
-        # number + pin
-        pp = ease_out_back((lt - 0.08) / 0.25)
-        if lt > 0.08:
-            blit(img, self.pin, x + 23, base_y - 175, a, max(0.02, pp), (0.5, 1.0))
-            na = clamp((lt - 0.14) / 0.12) * a
-            blit(img, self.num, x + 62 - 30 * (1 - ease_out_cubic((lt - 0.14) / 0.25)),
-                 base_y - 196, na, 1.0, (0.0, 0.5))
-        # name: rises out of a mask
-        p = ease_out_back((lt - 0.1) / 0.35, 1.4)
-        nh = self.name.shape[0]
-        y_top = base_y - nh
-        blit(img, self.name, x, y_top + (1 - p) * nh * 1.1, a, 1.0, (0.0, 0.0),
-             clip=(0, y_top - 40, W, base_y + 8))
-        # pill wipes in from the left
-        wp = ease_out_cubic((lt - 0.3) / 0.3)
-        if wp > 0:
-            pw = self.pill.shape[1]
-            blit(img, self.pill, x, base_y + 28, a, 1.0, (0.0, 0.0),
-                 clip=(x, 0, x + pw * wp, H))
-
-
-def bottom_shade(img, a):
-    if a <= 0:
-        return img
-    g = SHADE * a
-    return (img.astype(np.float32) * (1 - g)).astype(np.uint8)
-
-
-def build_shade():
-    y = np.linspace(0, 1, H, dtype=np.float32)
-    g = np.clip((y - 0.45) / 0.3, 0, 1) ** 1.3 * 0.62
-    g = g * np.clip((0.92 - y) / 0.12, 0.35, 1)
-    return np.repeat(g[:, None, None], W, axis=1)
-
-
-def build_vignette():
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-    r = np.sqrt(((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2)
-    return (1 - 0.32 * np.clip(r / 1.3, 0, 1) ** 2.4)[..., None]
-
-
-SHADE = build_shade()
-VIGN = build_vignette()
-
-
-class Intro:
+class FrameSource:
     def __init__(self):
-        f1 = fit_font(F_HEAD, "ОДИН ДЕНЬ", 900, 118)
-        self.l1 = [text_sprite(ch, f1, WHITE, 0.6, trim_y=False) if ch != " " else None
-                   for ch in "ОДИН ДЕНЬ"]
-        adv = [f1.getlength(ch) for ch in "ОДИН ДЕНЬ"]
-        total = sum(adv)
-        self.l1x = []
-        x = W / 2 - total / 2
-        for a in adv:
-            self.l1x.append(x + a / 2)
-            x += a
-        f2 = fit_font(F_HEAD, "В АРМЕНИИ", 820, 104)
-        self.l2 = text_sprite("В АРМЕНИИ", f2, DARK, 0)
-        bw, bh = self.l2.shape[1] + 64, self.l2.shape[0] + 44
-        self.box = rounded_rect_sprite(bw, bh, 18, ACCENT)
-        self.top = text_sprite("27 · 09", font(F_BODY, 46, 700), WHITE, 0.5, tracking=6)
+        self.reader, self.cur = None, None
 
-    def draw(self, img, t):
-        if t >= 4.12:
-            return
-        push = 1.0 + 0.9 * ease_in_cubic((t - 3.75) / 0.37)  # flies into camera at the drop
-        fade = 1 - clamp((t - 3.95) / 0.17)
-        build = 1 + 0.04 * clamp((t - 2.0) / 1.75)
-        s = push * build
-        cy1, cy2 = 800, 960
+    def get(self, t):
+        seg = seg_at(t)
+        if seg is not self.cur:
+            if self.reader:
+                self.reader.close()
+            self.reader, self.cur = SegmentReader(seg[0], seg[1]), seg
+        return self.reader.get(src_time(seg, t - seg[2])), self.reader.key()
 
-        def pos(x, y):
-            return W / 2 + (x - W / 2) * s, H / 2 + (y - H / 2) * s
+    def close(self):
+        if self.reader:
+            self.reader.close()
 
-        for i, (spr, cx) in enumerate(zip(self.l1, self.l1x)):
-            if spr is None:
+
+# ---------------------------------------------------------------- title placement
+def place_titles(titles, seg):
+    """Put each depth title where the scene hides the lower part of the letters
+    (~20% of the glyph area) while their upper half stays in open sky."""
+    src = FrameSource()
+    f = 6
+    for tt in titles:
+        s = tt.spec
+        fa, ox, oy = tt.alpha_footprint()
+        fa_s = cv2.resize(fa, (max(1, fa.shape[1] // f), max(1, fa.shape[0] // f)), interpolation=cv2.INTER_AREA)
+        hs, ws = fa_s.shape
+        masks = []
+        t = s["start"] + 0.05
+        while t < s["end"] - 0.02:
+            frame, key = src.get(t)
+            masks.append(seg.mask(frame, key))
+            t += 3 / FPS
+        M = cv2.resize(np.mean(masks, 0), (W // f, H // f), interpolation=cv2.INTER_AREA)
+        top = fa_s.copy()
+        top[hs // 2:] = 0
+        tot, ttot = fa_s.sum(), top.sum()
+        best = None
+        for cy in range(280 // f, 1150 // f):
+            y0 = cy + int(round(oy / f))
+            if y0 < 230 // f or y0 + hs > H // f:
                 continue
-            p = ease_out_back((t - 0.05 - i * 0.045) / 0.28, 2.2)
-            if p <= 0:
-                continue
-            x, y = pos(cx, cy1)
-            blit(img, spr, x, y - (1 - p) * 60, fade * clamp(p * 2), s * max(0.02, p))
-        bp = ease_out_cubic((t - 0.95) / 0.28)
-        if bp > 0:
-            x, y = pos(W / 2, cy2)
-            bw = self.box.shape[1] * s
-            blit(img, self.box, x, y, fade, s, clip=(x - bw / 2, 0, x - bw / 2 + bw * bp, H))
-            tp = clamp((t - 1.1) / 0.2)
-            blit(img, self.l2, x, y + (1 - tp) * 25, fade * tp, s,
-                 clip=(x - bw / 2, 0, x - bw / 2 + bw * bp, H))
-        ta = clamp((t - 1.6) / 0.3) * fade
-        x, y = pos(W / 2, 660)
-        blit(img, self.top, x, y, ta, s)
-
-
-class EndCard:
-    def __init__(self):
-        self.title = text_sprite("АРМЕНИЯ", fit_font(F_HEAD, "АРМЕНИЯ", 940, 150), WHITE, 0.6)
-        self.stops = [("Гарни", 150), ("Севан", 500), ("Севанаванк", 850)]
-        fs = font(F_BODY, 44, 700)
-        self.names = [text_sprite(n, fs, WHITE, 0.6) for n, _ in self.stops]
-        self.dot = pin_sprite(40, ACCENT)
-        cta = text_sprite("сохрани, чтобы не потерять", font(F_BODY, 40, 700), DARK, 0)
-        pw, ph = cta.shape[1] + 60, cta.shape[0] + 34
-        pill = rounded_rect_sprite(pw, ph, ph // 2, WHITE)
-        blit(pill, cta, pw / 2, ph / 2)
-        self.cta = pill
-
-    def draw(self, img, t):
-        lt = t - 24.5
-        if lt < 0:
-            return img
-        dark = 0.42 * clamp(lt / 0.25)
-        img = (img.astype(np.float32) * (1 - dark)).astype(np.uint8)
-        hit = 1 + 0.12 * math.exp(-max(0, t - 26.0) / 0.12) if t >= 26.0 else 1.0
-        p = ease_out_back(lt / 0.35, 1.6)
-        if p > 0:
-            blit(img, self.title, W / 2, 800, clamp(p * 1.5), (0.85 + 0.15 * p) * hit)
-        # route line draws between 25.0 and 26.0
-        lp = ease_out_cubic((t - 25.0) / 1.0)
-        y = 1010
-        x0, x1 = self.stops[0][1], self.stops[-1][1]
-        if lp > 0:
-            xe = int(x0 + (x1 - x0) * lp)
-            cv2.line(img, (x0, y), (xe, y), (255, 255, 255), 5, cv2.LINE_AA)
-            for i, (n, x) in enumerate(self.stops):
-                reach = (x - x0) / (x1 - x0)
-                t_reach = 25.0 + 1 - (1 - reach) ** (1 / 3)  # inverse of ease_out_cubic
-                dp = ease_out_back((t - t_reach + 0.05) / 0.3, 2.0)
-                if dp > 0:
-                    blit(img, self.dot, x, y + 8, 1.0, max(0.02, dp), (0.5, 1.0))
-                    blit(img, self.names[i], x, y + 58, clamp(dp), 1.0)
-        cp = ease_out_back((t - 26.15) / 0.35, 1.5)
-        if cp > 0:
-            blit(img, self.cta, W / 2, 1245 + (1 - cp) * 40, clamp(cp * 1.4), 1.0)
-        return img
-
-
-def light_leak(t_rel):
-    """Warm moving light leak (BGR float, 0..1 intensity)."""
-    yy, xx = np.mgrid[0:H:4, 0:W:4].astype(np.float32)
-    cx = W * (0.1 + 0.9 * t_rel)
-    cy = H * (0.35 - 0.15 * t_rel)
-    g = np.exp(-(((xx - cx) / (W * 0.55)) ** 2 + ((yy - cy) / (H * 0.45)) ** 2))
-    g = cv2.resize(g, (W, H))
-    col = np.array([60, 150, 255], np.float32) / 255  # BGR warm orange
-    return g[..., None] * col
+            for cx in range(W // f // 2 - 24, W // f // 2 + 25, 2):
+                x0 = cx + int(round(ox / f))
+                if x0 < 24 // f or x0 + ws > (W - 24) // f:
+                    continue
+                win = M[y0:y0 + hs, x0:x0 + ws]
+                vis = (fa_s * win).sum() / tot
+                vt = (top * win).sum() / ttot
+                if vt < 0.93:
+                    continue
+                if vis > 0.97:  # nothing in front: open sky, a little above the middle
+                    score = -0.4 - abs(cy * f - 600) / 3000 - abs(cx * f - W / 2) / 3000
+                else:
+                    score = -abs(vis - 0.8) - abs(cx * f - W / 2) / 4000
+                if best is None or score > best[0]:
+                    best = (score, cx * f, cy * f, vis, vt)
+        if best is None:
+            best = (0, W // 2, 600, -1, -1)
+        tt.pos = (best[1], best[2])
+        print(f"title {s['text']}: pos={tt.pos} visible={best[3]:.2f} top={best[4]:.2f}", flush=True)
+    src.close()
 
 
 # ---------------------------------------------------------------- render
-def transition_fx(frame, t, fi):
-    """Geometric / blur part of transitions. Returns frame, post-fx dict."""
-    post = {"flash": 0.0, "rgb": 0.0, "glitch": 0.0, "shake": 0.0, "leak": None}
-    for cut, spec in TRANSITIONS.items():
-        cf = int(round(cut * FPS))
-        k = fi - cf  # <0: outgoing clip, >=0: incoming clip
-        kind = spec[0]
-        if kind in ("zoom", "zoomsoft"):
-            big = kind == "zoom"
-            n_out, n_in = (4, 5) if big else (3, 3)
-            amp = 0.55 if big else 0.25
-            if -n_out <= k < 0:
-                p = (n_out + k + 1) / n_out
-                frame = zoom_blur(frame, 1 + amp * p ** 2, 0.18 * p)
-                post["rgb"] = max(post["rgb"], 10 * p)
-            elif 0 <= k < n_in:
-                q = 1 - k / n_in
-                frame = zoom_blur(frame, 1 + amp * 0.8 * q ** 2, 0.14 * q)
-                post["rgb"] = max(post["rgb"], 12 * q)
-                if big and len(spec) > 1 and spec[1]:
-                    post["flash"] = max(post["flash"], [0.85, 0.5, 0.25, 0.1, 0][min(k, 4)])
-                    post["shake"] = max(post["shake"], 1.0)
-                elif big:
-                    post["shake"] = max(post["shake"], 0.5)
-        elif kind == "whip":
-            dx, dy = spec[1]
-            n = 3
-            L = W if dx else H
-            if -n <= k < 0:
-                p = (n + k + 1) / n
-                off = L * 0.45 * p ** 2
-                fr = affine(frame, 1.0, 0, dx * off, dy * off)
-                frame = motion_blur(fr, dx * 260 * p, dy * 260 * p)
-            elif 0 <= k < n:
-                q = 1 - (k + 1) / (n + 1)
-                off = -L * 0.45 * q ** 2
-                fr = affine(frame, 1.0, 0, dx * off, dy * off)
-                frame = motion_blur(fr, dx * 260 * q, dy * 260 * q)
-        elif kind == "spin":
-            n = 4
-            if -n <= k < 0:
-                p = (n + k + 1) / n
-                frame = zoom_blur(affine(frame, 1 + 0.25 * p, 55 * p ** 2), 1.0, 0.12 * p, 4)
-                post["rgb"] = max(post["rgb"], 8 * p)
-            elif 0 <= k < n:
-                q = 1 - k / n
-                frame = zoom_blur(affine(frame, 1 + 0.25 * q, -55 * q ** 2), 1.0, 0.12 * q, 4)
-                post["rgb"] = max(post["rgb"], 8 * q)
-        elif kind == "glitch":
-            if -2 <= k < 4:
-                post["glitch"] = max(post["glitch"], 1.0 - abs(k + 0.5) / 4.5)
-                if k in (0, 1):
-                    post["flash"] = max(post["flash"], 0.35 if k == 0 else 0.12)
-                post["shake"] = max(post["shake"], 0.6)
-        elif kind == "leak":
-            if 0 <= k < 16:
-                q = k / 16
-                frame = affine(frame, 1 + 0.22 * (1 - ease_out_cubic(q)))
-                post["leak"] = (q, 0.9 * (1 - q) ** 1.5)
-                post["flash"] = max(post["flash"], [0.45, 0.2, 0.08][k] if k < 3 else 0)
-            elif -3 <= k < 0:
-                post["leak"] = (0.0, 0.35 * (4 + k) / 3)
-    return frame, post
-
-
-def beat_pulse(t):
-    if t < 4.0 or t >= 24.5:
-        return 1.0
-    b = math.floor(t / BEAT + 1e-6) * BEAT
-    dt = t - b
-    strong = abs((b / 2.0) - round(b / 2.0)) < 1e-6
-    return 1 + (0.045 if strong else 0.025) * math.exp(-dt / 0.11)
-
-
-def shake_offsets(fi, strength):
-    rng = np.random.default_rng(fi * 7919)
-    return rng.normal(0, 14 * strength), rng.normal(0, 14 * strength), rng.normal(0, 0.7 * strength)
-
-
 def render_video(path):
+    seg = SkySegmenter(os.path.join(WORK, "models", "segformer_b2.onnx"), os.path.join(WORK, "skycache"))
+    titles = [Title(s) for s in TITLES]
+    place_titles(titles, seg)
+    chapters = [Chapter(c) for c in CHAPTERS]
     intro, end = Intro(), EndCard()
-    labels = [Label(*l) for l in LABELS]
+    scene, hud = Layer(), Layer()
     enc = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
          "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "17",
          "-maxrate", "16M", "-bufsize", "32M", "-pix_fmt", "yuv420p", "-profile:v", "high",
          "-movflags", "+faststart", path], stdin=subprocess.PIPE)
-    reader, cur = None, None
-    shake_left = 0.0
-    for fi in range(NFRAMES):
+    src = FrameSource()
+    shake = 0.0
+    frames = range(NFRAMES)
+    if os.environ.get("FRAMES"):
+        a, b = (int(v) for v in os.environ["FRAMES"].split(":"))
+        frames = range(a, b)
+    for fi in frames:
         t = fi / FPS
-        seg = next(s for s in SEGMENTS if s[2] <= t + 1e-9 < s[2] + s[3])
-        if seg is not cur:
-            if reader:
-                reader.close()
-            reader, cur = SegmentReader(seg[0], seg[1]), seg
-        frame = reader.get(src_time(seg, t - seg[2]))
+        frame, key = src.get(t)
 
-        frame, post = transition_fx(frame, t, fi)
-        # end-card hit on the last big beat
+        # 1) scene text: composited into the footage, so transitions move it too
+        live = [tt for tt in titles if tt.alive(t)]
+        if live:
+            for tt in live:
+                tt.draw(scene, t)
+            mask = seg.mask(frame, key) if any(tt.spec["depth"] for tt in live) else None
+            frame = scene.composite(frame, mask)
+        if t < 4.0:
+            frame = (frame.astype(np.float32) * INTRO_BAND).astype(np.uint8)
+            intro.draw(scene, t, fi)
+            frame = scene.composite(frame)
+
+        # 2) transitions, beat pulse, shake
+        frame, post = transition_fx(frame, fi)
         if 26.0 <= t < 26.2:
-            post["flash"] = max(post["flash"], 0.6 * (1 - (t - 26.0) / 0.2))
-            post["shake"] = max(post["shake"], 1.0)
-        shake_left = max(shake_left * 0.72, post["shake"])
-        sx, sy, sa = shake_offsets(fi, shake_left) if shake_left > 0.05 else (0, 0, 0)
-        frame = affine(frame, beat_pulse(t) * (1.02 if shake_left > 0.05 else 1.0), sa, sx, sy)
+            post["flash"] = max(post["flash"], 0.3 * (1 - (t - 26.0) / 0.2))
+            post["shake"] = max(post["shake"], 0.6)
+        shake = max(shake * 0.72, post["shake"])
+        if shake > 0.05:
+            rng = np.random.default_rng(fi * 7919)
+            sx, sy, sa = rng.normal(0, 13 * shake), rng.normal(0, 13 * shake), rng.normal(0, 0.6 * shake)
+            frame = affine(frame, beat_pulse(t) * 1.02, sa, sx, sy)
+        else:
+            frame = affine(frame, beat_pulse(t))
 
+        # 3) look
         frame = (frame.astype(np.float32) * VIGN).astype(np.uint8)
         if post["leak"] is not None:
             q, a = post["leak"]
-            lk = light_leak(q) * a
             f = frame.astype(np.float32) / 255
-            frame = ((1 - (1 - f) * (1 - lk)) * 255).astype(np.uint8)  # screen blend
+            frame = ((1 - (1 - f) * (1 - light_leak(q) * a)) * 255).astype(np.uint8)
+        if t >= 24.5:
+            d = 0.22 * clamp((t - 24.5) / 0.4)
+            frame = (frame.astype(np.float32) * (1 - d)).astype(np.uint8)
 
-        # text layers
-        la = 0.0
-        for lb in labels:
-            if lb.start <= t < lb.end:
-                la = clamp((t - lb.start - 0.05) / 0.25) * (1 - clamp((t - (lb.end - 0.16)) / 0.16))
-        if t < 4.12:
-            frame = (frame.astype(np.float32) * (1 - 0.22 * (1 - clamp((t - 3.9) / 0.2)))).astype(np.uint8)
-        frame = bottom_shade(frame, la)
-        intro.draw(frame, t)
-        for lb in labels:
-            lb.draw(frame, t)
-        frame = end.draw(frame, t)
+        # 4) HUD text on top
+        vis = max([c.visibility(t) for c in chapters] + [clamp((t - 24.9) / 0.4)])
+        if vis > 0:
+            frame = (frame.astype(np.float32) * (1 - SHADE * vis)).astype(np.uint8)
+        for c in chapters:
+            c.draw(hud, t, fi)
+        end.draw(hud, t)
+        frame = hud.composite(frame)
 
-        if post["glitch"] > 0:
-            frame = glitch(frame, post["glitch"], fi)
+        # 5) post
         if post["rgb"] > 0.5:
             frame = rgb_split(frame, post["rgb"])
         frame = flash(frame, post["flash"])
+        frame = (frame.astype(np.float32) + GRAIN[fi % len(GRAIN)][..., None]).clip(0, 255).astype(np.uint8)
         enc.stdin.write(np.ascontiguousarray(frame).tobytes())
         if fi % 60 == 0:
             print(f"frame {fi}/{NFRAMES}", flush=True)
-    reader.close()
+    src.close()
     enc.stdin.close()
     enc.wait()
 
@@ -635,15 +838,13 @@ def render_video(path):
 def whoosh(dur=0.42, peak=0.72, f0=350, f1=5200, pan=(-0.8, 0.8), seed=0):
     rng = np.random.default_rng(seed)
     n = int(dur * SR)
-    noise = rng.standard_normal(n)
-    f, tt, Z = signal.stft(noise, SR, nperseg=1024)
+    f, tt, Z = signal.stft(rng.standard_normal(n), SR, nperseg=1024)
     fc = f0 * (f1 / f0) ** (tt / tt.max())
     mask = np.exp(-0.5 * ((np.log(f[:, None] + 1) - np.log(fc[None, :])) / 0.45) ** 2)
     _, y = signal.istft(Z * mask, SR, nperseg=1024)
     y = y[:n]
     x = np.linspace(0, 1, n)
-    env = np.where(x < peak, (x / peak) ** 2.5, np.exp(-(x - peak) / 0.05))
-    y = y * env
+    y = y * np.where(x < peak, (x / peak) ** 2.5, np.exp(-(x - peak) / 0.05))
     y /= np.abs(y).max() + 1e-9
     pl = np.linspace(pan[0], pan[1], n)
     return np.stack([y * np.sqrt((1 - pl) / 2), y * np.sqrt((1 + pl) / 2)], 1), peak * dur
@@ -659,30 +860,15 @@ def boom():
     return np.stack([y, y], 1), 0.0
 
 
-def glitch_sfx(seed):
-    rng = np.random.default_rng(seed)
-    n = int(0.22 * SR)
-    y = rng.standard_normal(n)
-    gate = (np.sin(2 * np.pi * 34 * np.arange(n) / SR) > 0).astype(float)
-    y = np.round(y * gate * 6) / 6
-    b, a = signal.butter(2, [900, 6000], "bandpass", fs=SR)
-    y = signal.lfilter(b, a, y) * np.exp(-np.arange(n) / SR / 0.1)
-    y /= np.abs(y).max()
-    return np.stack([y, y], 1), 0.02
-
-
 def render_audio(path):
     sr, music = wavfile.read(os.path.join(WORK, "music", "823.wav"))
     assert sr == SR
-    music = music.astype(np.float32)
     s0 = int(MUSIC_START * SR)
-    mix = music[s0:s0 + int(DUR * SR)].copy()
+    mix = music.astype(np.float32)[s0:s0 + int(DUR * SR)].copy()
     n = len(mix)
-    fade_in = int(0.03 * SR)
-    mix[:fade_in] *= np.linspace(0, 1, fade_in)[:, None]
+    mix[:int(0.03 * SR)] *= np.linspace(0, 1, int(0.03 * SR))[:, None]
     fo = int(1.3 * SR)
     mix[-fo:] *= np.linspace(1, 0, fo)[:, None] ** 1.5
-
     sfx = np.zeros_like(mix)
 
     def place(clip_peak, at, gain):
@@ -692,22 +878,17 @@ def render_audio(path):
         if b > a:
             sfx[a:b] += clip[a - i0:b - i0] * gain
 
-    for i, (cut, spec) in enumerate(sorted(TRANSITIONS.items())):
-        kind = spec[0]
-        if kind == "whip":
-            dx = spec[1][0]
-            pan = (-0.9, 0.9) if dx <= 0 else (0.9, -0.9)
-            place(whoosh(0.38, 0.75, 500, 6000, pan, seed=i), cut, 0.30)
-        elif kind in ("zoom", "zoomsoft", "spin", "leak"):
-            place(whoosh(0.6, 0.85, 250, 4200, (0, 0), seed=i), cut, 0.26 if kind != "zoomsoft" else 0.18)
-        elif kind == "glitch":
-            place(glitch_sfx(i), cut, 0.16)
-    for at in (4.0, 16.0, 26.0):
-        place(boom(), at, 0.42)
-
+    for i, (cut, tr) in enumerate(sorted(TRANSITIONS.items())):
+        if tr["kind"] == "whip":
+            pan = (-0.9, 0.9) if tr["dir"][0] <= 0 else (0.9, -0.9)
+            place(whoosh(0.38, 0.75, 500, 6000, pan, seed=i), cut, 0.28)
+        else:
+            gain = 0.24 if tr.get("amp", 0.5) >= 0.4 else 0.16
+            place(whoosh(0.6, 0.85, 250, 4200, (0, 0), seed=i), cut, gain)
+    for at, g in ((4.0, 0.42), (16.0, 0.3), (26.0, 0.4)):
+        place(boom(), at, g)
     out = mix + sfx
-    peak = np.abs(out).max()
-    out = np.tanh(out / max(peak, 1e-6) * 1.15) / np.tanh(1.15) * 0.93
+    out = np.tanh(out / max(np.abs(out).max(), 1e-6) * 1.15) / np.tanh(1.15) * 0.93
     wavfile.write(path, SR, out.astype(np.float32))
 
 
@@ -723,6 +904,4 @@ if __name__ == "__main__":
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", vid, "-i", aud, "-c:v", "copy",
                         "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-shortest",
                         "-movflags", "+faststart", os.path.join(OUT, "reel_music.mp4")], check=True)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", vid, "-c", "copy", "-an",
-                        "-movflags", "+faststart", os.path.join(OUT, "reel_no_music.mp4")], check=True)
         print("done")
