@@ -978,6 +978,11 @@ def render_video(path):
             spr = np.roll(spr, CHROME_DY, axis=0)
             if CHROME_DY < 0:
                 spr[CHROME_DY:] = 0
+            # soft contact shadow so the chrome reads against a bright sky
+            sh = np.zeros_like(spr)
+            sh[..., 3] = np.roll(cv2.GaussianBlur(spr[..., 3], (0, 0), 16), 14, axis=0) * 0.55
+            sh[..., :3] = 10
+            hud.draw(sh, 0, 0)
             hud.draw(spr, 0, 0)
             frame = hud.composite(frame)
 
