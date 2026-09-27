@@ -96,7 +96,7 @@ TITLES = [
     dict(text="Гарни", start=4.05, end=5.5, size=250, depth=True),
     dict(text="Севан", start=8.05, end=9.5, size=250, depth=True),
     dict(text="Севанаванк", start=16.05, end=18.0, size=190, depth=True, vis=0.95),
-    dict(text="Армения", start=24.6, end=27.5, size=235, depth=True, punch=26.0),
+    dict(text="Армения", start=24.6, end=27.5, size=235, depth=True, punch=26.0, vis=0.88),
 ]
 
 CHAPTERS = [
@@ -431,7 +431,7 @@ class Chapter:
         self.spec = spec
         self.head = Scramble(f"{spec['num']} — {spec['time']}", mono(30, 500), WHITE, 0.5)
         self.title = Word(spec["title"], sans(30, 600), WHITE, shadow=0.5, tracking=4.5, shadow_blur=6)
-        self.coords = Scramble(spec["coords"], mono(25, 400), WHITE, 0.5) if spec["coords"] else None
+        self.coords = Scramble(spec["coords"], mono(26, 500), WHITE, 0.5) if spec["coords"] else None
 
     def visibility(self, t):
         s = self.spec
@@ -452,7 +452,7 @@ class Chapter:
         layer.line(x, y + 26, x + 210 * lp, y + 26, 0.75 * a, 2)
         draw_type_on(layer, self.title, x, y + 78, t, s["start"] + 0.12, a)
         if self.coords:
-            self.coords.draw(layer, x, y + 124, t, s["start"] + 0.3, fi, 0.72 * a, per=0.018)
+            self.coords.draw(layer, x, y + 124, t, s["start"] + 0.3, fi, 0.82 * a, per=0.018)
 
 
 class Intro:
@@ -718,7 +718,8 @@ class FrameSource:
 # ---------------------------------------------------------------- title placement
 def place_titles(titles, seg):
     """Put each depth title where the scene hides the lower part of the letters
-    (~20% of the glyph area) while their upper half stays in open sky."""
+    (about `vis` of the glyph area stays visible on average) while their upper
+    part stays in open sky in every frame of the shot, even as the camera moves."""
     src = FrameSource()
     f = 6
     for tt in titles:
@@ -727,45 +728,47 @@ def place_titles(titles, seg):
         t = s["start"] + 0.05
         while t < s["end"] - 0.02:
             frame, key = src.get(t)
-            masks.append(seg.mask(frame, key))
+            masks.append(cv2.resize(seg.mask(frame, key), (W // f, H // f), interpolation=cv2.INTER_AREA))
             t += 3 / FPS
-        M = cv2.resize(np.mean(masks, 0), (W // f, H // f), interpolation=cv2.INTER_AREA)
+        target = s.get("vis", 0.8)
         best = None
-        for attempt in range(6):
+        # first try the full size with strict, then relaxed per-frame limits; then shrink
+        plan = [(0.9, 0.15), (0.8, 0.3)] + [(0.9, 0.15)] * 5
+        for attempt, (top_min, slack) in enumerate(plan):
+            if attempt >= 2:
+                tt.resize(0.88)  # does not fit anywhere: shrink and retry
             fa, ox, oy = tt.alpha_footprint()
             fa_s = cv2.resize(fa, (max(1, fa.shape[1] // f), max(1, fa.shape[0] // f)),
-                              interpolation=cv2.INTER_AREA)
+                              interpolation=cv2.INTER_AREA).astype(np.float32)
             hs, ws = fa_s.shape
             top = fa_s.copy()
             top[int(hs * 0.55):] = 0
-            tot, ttot = fa_s.sum(), top.sum()
-            for cy in range(260 // f, 1150 // f):
-                y0 = cy + int(round(oy / f))
-                if y0 < 240 // f or y0 + hs > 1250 // f:
-                    continue
-                for cx in range(0, W // f):
-                    x0 = cx + int(round(ox / f))
-                    if x0 < 50 // f or x0 + ws > (W - 50) // f:
+            # correlation maps: value at (y0, x0) = coverage of the text box whose top-left is there
+            vis = np.stack([cv2.filter2D(m, -1, fa_s, anchor=(0, 0), borderType=cv2.BORDER_CONSTANT)
+                            for m in masks]) / fa_s.sum()
+            vtop = np.stack([cv2.filter2D(m, -1, top, anchor=(0, 0), borderType=cv2.BORDER_CONSTANT)
+                             for m in masks]) / top.sum()
+            v_mean, v_min, t_min = vis.mean(0), vis.min(0), vtop.min(0)
+            for y0 in range(240 // f, 1250 // f - hs):
+                for x0 in range(50 // f, (W - 50) // f - ws):
+                    if t_min[y0, x0] < top_min or v_min[y0, x0] < target - slack:
                         continue
-                    win = M[y0:y0 + hs, x0:x0 + ws]
-                    vis = (fa_s * win).sum() / tot
-                    vt = (top * win).sum() / ttot
-                    if vt < 0.95:
-                        continue
-                    if vis > 0.97:  # nothing in front: open sky, a little above the middle
-                        score = -0.4 - abs(cy * f - 620) / 3000 - abs(cx * f - W / 2) / 2000
+                    cx = (x0 - ox / f) * f
+                    cy = (y0 - oy / f) * f
+                    vm = v_mean[y0, x0]
+                    if vm > 0.97:  # nothing in front: open sky, a little above the middle
+                        score = -0.4 - abs(cy - 620) / 3000 - abs(cx - W / 2) / 2000
                     else:
-                        score = -abs(vis - s.get("vis", 0.8)) - abs(cx * f - W / 2) / 3000
+                        score = -abs(vm - target) - abs(cx - W / 2) / 3000
                     if best is None or score > best[0]:
-                        best = (score, cx * f, cy * f, vis, vt, tt.word.fnt.size)
+                        best = (score, int(cx), int(cy), vm, v_min[y0, x0], tt.word.fnt.size)
             if best is not None:
                 break
-            tt.resize(0.88)  # does not fit anywhere: shrink and retry
         if best is None:
             best = (0, W // 2, 620, -1, -1, tt.word.fnt.size)
         tt.pos = (best[1], best[2])
-        print(f"title {s['text']}: size={best[5]} pos={tt.pos} visible={best[3]:.2f} top={best[4]:.2f}",
-              flush=True)
+        print(f"title {s['text']}: size={best[5]} pos={tt.pos} visible mean={best[3]:.2f} "
+              f"min={best[4]:.2f}", flush=True)
     src.close()
 
 
