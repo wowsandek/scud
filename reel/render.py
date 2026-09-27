@@ -35,10 +35,16 @@ os.makedirs(OUT, exist_ok=True)
 
 W, H, FPS = 1080, 1920, 30
 BEAT = 0.5
-DUR = 29.5
+DUR = 45.5
 NFRAMES = int(DUR * FPS)
-MUSIC_START = 48.1336  # track time of reel t=0 (bar start, drop lands at t=6.0)
-DROP = 6.0
+MUSIC_START = 32.1336  # track time of reel t=0 (bar start, drop lands at t=22.0)
+DROP = 22.0            # arrival at Lake Sevan
+END0 = 42.5            # end card (music break), big hit at END0 + 1.5
+MAP_RANGES = [(0.0, 3.0), (4.0, 6.0), (13.0, 14.5), (19.0, 22.0)]   # 3D flights
+
+
+def in_map(t):
+    return any(a <= t < b for a, b in MAP_RANGES)
 SR = 44100
 
 WHITE = (255, 255, 255)
@@ -55,64 +61,108 @@ F_MONO = "JetBrainsMono.ttf"
 # ---------------------------------------------------------------- edit list
 # clip, source in-point, reel start, reel duration, speed ramp [(dur, speed)]
 SEGMENTS = [
-    ("map", 0.0, 0.0, 6.0, [(6.0, 1.0)]),            # 3D globe + terrain flyover (map3d.py)
-    ("c1", 7.45, 6.0, 1.5, [(1.5, 1.0)]),            # 01 Garni — title behind the cliff (drop)
-    ("c1", 0.50, 7.5, 1.0, [(1.0, 1.5)]),
-    ("c1", 4.60, 8.5, 0.5, [(0.5, 1.5)]),
-    ("c1", 13.0, 9.0, 1.0, [(1.0, 1.2)]),
-    ("c2", 1.60, 10.0, 1.5, [(1.5, 1.3)]),           # 02 Sevan — title in the sky
-    ("c2", 17.0, 11.5, 1.5, [(1.5, 1.0)]),
-    ("c3", 12.8, 13.0, 1.5, [(1.5, 1.5)]),           # 03 jet ski (+ chrome 3D word)
-    ("c3", 26.6, 14.5, 1.0, [(1.0, 1.5)]),
-    ("c3", 41.0, 15.5, 2.5, [(0.5, 2.0), (1.5, 0.5), (0.5, 2.0)]),
-    # 04 Sevanavank — frozen frame, 3D orbit around the church, title behind it
-    ("c4", 11.9, 18.0, 2.0, [], dict(zoom=(1.03, 1.11), kz=0.08, tx=(48, -48), ty=(-8, 8))),
-    ("c2", 12.4, 20.0, 1.0, [(1.0, 1.2)]),
-    ("c4", 4.50, 21.0, 1.0, [(1.0, 1.5)]),
-    ("c5", 15.4, 22.0, 2.0, [(2.0, 1.0)]),           # 05 peninsula
-    ("c5", 17.4, 24.0, 2.5, [(2.5, 0.78)]),
+    ("mapA", 0.0, 0.0, 3.0, [(3.0, 1.0)]),           # globe -> dive into Yerevan
+    ("c6", 0.50, 3.0, 1.0, [(1.0, 3.0)]),            # on the road (timelapse)
+    ("mapB", 0.0, 4.0, 2.0, [(2.0, 1.0)]),           # flight Yerevan -> Garni
+    # 01 Garni temple — frozen colonnade, 3D orbit, title behind the columns
+    ("c7", 7.55, 6.0, 1.5, [], dict(zoom=(1.02, 1.09), kz=0.09, tx=(-42, 42), ty=(4, -4))),
+    ("c7", 11.2, 7.5, 1.0, [(1.0, 1.2)]),
+    ("c7", 40.3, 8.5, 1.0, [(1.0, 1.3)]),
+    ("c7", 55.6, 9.5, 0.5, [(0.5, 2.0)]),
+    ("c1", 7.45, 10.0, 1.5, [(1.5, 1.0)]),           # 02 Garni gorge — title behind the cliff
+    ("c1", 0.50, 11.5, 1.0, [(1.0, 1.5)]),
+    ("c1", 4.60, 12.5, 0.5, [(0.5, 1.5)]),
+    ("mapC", 0.0, 13.0, 1.5, [(1.5, 1.0)]),          # flight Garni -> Geghard
+    # 03 Geghard — frozen courtyard, 3D push-in (people slide off the cliff)
+    ("c8", 0.60, 14.5, 1.5, [], dict(zoom=(1.0, 1.07), kz=0.10, tx=(30, -30), ty=(0, -6))),
+    ("c8", 2.00, 16.0, 0.5, [(0.5, 1.5)]),
+    ("c8", 7.20, 16.5, 1.0, [(1.0, 1.4)]),
+    ("c8", 15.0, 17.5, 0.5, [(0.5, 2.0)]),
+    ("c9", 2.00, 18.0, 1.0, [(1.0, 3.0)]),           # on the road to Sevan (timelapse)
+    ("mapD", 0.0, 19.0, 3.0, [(3.0, 1.0)]),          # flight Geghard -> Sevan
+    ("c2", 1.60, 22.0, 1.5, [(1.5, 1.3)]),           # 04 Sevan beach (drop) — title in the sky
+    ("c2", 17.0, 23.5, 1.5, [(1.5, 1.0)]),
+    ("c2", 15.0, 25.0, 1.0, [(1.0, 1.2)]),
+    ("c3", 12.8, 26.0, 1.5, [(1.5, 1.5)]),           # 05 jet ski (+ chrome 3D word)
+    ("c3", 26.6, 27.5, 1.0, [(1.0, 1.5)]),
+    ("c3", 41.0, 28.5, 2.5, [(0.5, 2.0), (1.5, 0.5), (0.5, 2.0)]),
+    ("c3", 44.0, 31.0, 1.0, [(1.0, 1.5)]),
+    # 06 Sevanavank — frozen frame, 3D orbit around the church, title behind it
+    ("c4", 11.9, 32.0, 2.0, [], dict(zoom=(1.03, 1.11), kz=0.08, tx=(48, -48), ty=(-8, 8))),
+    ("c2", 12.4, 34.0, 1.0, [(1.0, 1.2)]),
+    ("c4", 4.50, 35.0, 1.0, [(1.0, 1.5)]),
+    ("c4", 8.30, 36.0, 0.5, [(0.5, 1.5)]),
+    ("c5", 15.4, 36.5, 2.0, [(2.0, 1.0)]),           # 07 peninsula
+    ("c5", 5.80, 38.5, 1.5, [(1.5, 1.0)]),
+    ("c5", 17.6, 40.0, 2.5, [(2.5, 0.7)]),
     # end card — frozen panorama, 3D push-in, title behind the ridge
-    ("c5", 4.3, 26.5, 3.0, [], dict(zoom=(1.0, 1.08), kz=0.13, tx=(10, -18), ty=(0, -12))),
+    ("c5", 4.3, END0, 3.0, [], dict(zoom=(1.0, 1.08), kz=0.13, tx=(10, -18), ty=(0, -12))),
 ]
 
 TRANSITIONS = {
+    3.0: dict(kind="zoom", amp=0.5, n=(4, 5), flash=0.3, shake=0.4),
+    4.0: dict(kind="whip", dir=(0, 1)),
+    6.0: dict(kind="zoom", amp=0.55, n=(4, 5), flash=0.45, shake=0.6),
+    7.5: dict(kind="whip", dir=(-1, 0)),
+    8.5: dict(kind="cube", axis="y", n=5),
+    9.5: dict(kind="whip", dir=(-1, 0)),
+    10.0: dict(kind="zoom", amp=0.45, n=(3, 4), shake=0.4),
+    11.5: dict(kind="whip", dir=(0, -1)),
+    12.5: dict(kind="whip", dir=(-1, 0)),
+    13.0: dict(kind="whip", dir=(0, 1)),
+    14.5: dict(kind="zoom", amp=0.5, n=(4, 5), flash=0.35, shake=0.5),
+    16.0: dict(kind="whip", dir=(-1, 0)),
+    16.5: dict(kind="zoom", amp=0.35, n=(3, 3)),
+    17.5: dict(kind="whip", dir=(1, 0)),
+    18.0: dict(kind="cube", axis="x", n=5),
+    19.0: dict(kind="whip", dir=(0, 1)),
     DROP: dict(kind="zoom", amp=0.55, n=(4, 5), flash=0.7, shake=1.0),
-    7.5: dict(kind="whip", dir=(0, -1)),
-    8.5: dict(kind="whip", dir=(-1, 0)),
-    9.0: dict(kind="zoom", amp=0.4, n=(3, 4), shake=0.4),
-    10.0: dict(kind="cube", axis="y", n=5),
-    11.5: dict(kind="whip", dir=(-1, 0)),
-    13.0: dict(kind="cube", axis="x", n=5),
-    14.5: dict(kind="whip", dir=(1, 0)),
-    15.5: dict(kind="zoom", amp=0.4, n=(3, 4), shake=0.5),
-    18.0: dict(kind="zoom", amp=0.5, n=(4, 5), flash=0.35, shake=0.8),
-    20.0: dict(kind="whip", dir=(0, -1)),
-    21.0: dict(kind="whip", dir=(-1, 0)),
-    22.0: dict(kind="flip", n=6),
-    24.0: dict(kind="whip", dir=(-1, 0)),
-    26.5: dict(kind="leak"),
+    23.5: dict(kind="whip", dir=(-1, 0)),
+    25.0: dict(kind="cube", axis="y", n=5),
+    26.0: dict(kind="zoom", amp=0.5, n=(4, 4), shake=0.6),
+    27.5: dict(kind="whip", dir=(1, 0)),
+    28.5: dict(kind="zoom", amp=0.4, n=(3, 4), shake=0.5),
+    31.0: dict(kind="whip", dir=(-1, 0)),
+    32.0: dict(kind="zoom", amp=0.5, n=(4, 5), flash=0.35, shake=0.8),
+    34.0: dict(kind="whip", dir=(0, -1)),
+    35.0: dict(kind="whip", dir=(-1, 0)),
+    36.0: dict(kind="zoom", amp=0.35, n=(3, 3)),
+    36.5: dict(kind="flip", n=6),
+    38.5: dict(kind="whip", dir=(-1, 0)),
+    40.0: dict(kind="cube", axis="x", n=5),
+    END0: dict(kind="leak"),
 }
 
 # big serif titles living "in the scene" (under transitions); depth => behind non-sky
 TITLES = [
-    dict(text="Гарни", start=6.05, end=7.5, size=250, depth=True),
-    dict(text="Севан", start=10.05, end=11.5, size=250, depth=True),
-    dict(text="Севанаванк", start=18.05, end=20.0, size=190, depth=True, vis=0.95),
-    dict(text="Армения", start=26.6, end=29.5, size=235, depth=True, punch=28.0, vis=0.88),
+    dict(text="Гарни", start=6.05, end=7.5, size=250, depth=True, vis=0.96),
+    dict(text="Симфония\nкамней", start=10.05, end=11.5, size=160, depth=True),
+    dict(text="Гегард", start=14.55, end=16.0, size=230, depth=False, pos=(540, 1030)),
+    dict(text="Севан", start=22.05, end=23.5, size=250, depth=True),
+    dict(text="Севанаванк", start=32.05, end=34.0, size=190, depth=True, vis=0.95),
+    dict(text="Армения", start=END0 + 0.1, end=DUR, size=235, depth=True, punch=END0 + 1.5, vis=0.88),
 ]
 
 CHAPTERS = [
-    dict(start=6.15, end=9.92, num="01", time="11:56", title="ГАРНИ · СИМФОНИЯ КАМНЕЙ",
+    dict(start=3.1, end=3.97, num=None, time="10:29", title="В ПУТИ · ЕРЕВАН → ГАРНИ", coords=None),
+    dict(start=6.15, end=9.92, num="01", time="10:56", title="ХРАМ ГАРНИ · I ВЕК",
          coords="40.11° N  44.73° E"),
-    dict(start=10.15, end=12.92, num="02", time="14:50", title="ОЗЕРО СЕВАН · 1900 М",
-         coords="40.55° N  45.00° E"),
-    dict(start=13.15, end=17.92, num="03", time="15:26", title="ГИДРОЦИКЛ ПО СЕВАНУ", coords=None),
-    dict(start=18.15, end=21.92, num="04", time="16:03", title="СЕВАНАВАНК · IX ВЕК",
+    dict(start=10.15, end=12.92, num="02", time="11:56", title="УЩЕЛЬЕ ГАРНИ · СИМФОНИЯ КАМНЕЙ",
+         coords="40.11° N  44.74° E"),
+    dict(start=14.65, end=17.92, num="03", time="12:52", title="МОНАСТЫРЬ ГЕГАРД · XIII ВЕК",
+         coords="40.14° N  44.82° E"),
+    dict(start=18.1, end=18.97, num=None, time="14:11", title="В ПУТИ · НА СЕВАН", coords=None),
+    dict(start=22.15, end=25.92, num="04", time="14:50", title="ОЗЕРО СЕВАН · 1900 М",
+         coords="40.56° N  45.00° E"),
+    dict(start=26.15, end=31.92, num="05", time="15:26", title="ГИДРОЦИКЛ ПО СЕВАНУ", coords=None),
+    dict(start=32.15, end=36.42, num="06", time="16:03", title="СЕВАНАВАНК · IX ВЕК",
          coords="40.56° N  45.01° E"),
-    dict(start=22.15, end=26.42, num="05", time="16:22", title="ПОЛУОСТРОВ СЕВАН", coords=None),
+    dict(start=36.65, end=42.42, num="07", time="16:22", title="ПОЛУОСТРОВ СЕВАН", coords=None),
 ]
 
-CHROME_AT = 13.1      # chrome 3D word (map3d.py chrome), frames 0..72
+FLIGHTS = [(4.0, 6.0, "ЕРЕВАН → ГАРНИ"), (13.0, 14.5, "ГАРНИ → ГЕГАРД"), (19.0, 22.0, "ГЕГАРД → СЕВАН")]
+
+CHROME_AT = 26.1      # chrome 3D word (map3d.py chrome), frames 0..72
 CHROME_DY = -330      # shift up from frame centre
 
 # ---------------------------------------------------------------- easing
@@ -392,12 +442,14 @@ def draw_type_on(layer, word, x, y, t, t0, alpha=1.0, per=0.016, dur=0.35, ancho
 class Title:
     def __init__(self, spec):
         self.spec = spec
-        self.pos = None  # (cx, cy), decided by place_titles()
+        self.pos = spec.get("pos")  # (cx, cy); otherwise decided by place_titles()
         self._build(spec["size"])
 
     def _build(self, size):
-        self.word = Word(self.spec["text"], serif(size), WHITE, shadow=0.38, tracking=size * 0.01,
-                         shadow_blur=int(size * 0.09))
+        self.words = [Word(line, serif(size), WHITE, shadow=0.38, tracking=size * 0.01,
+                           shadow_blur=int(size * 0.09)) for line in self.spec["text"].split("\n")]
+        self.word = self.words[0]
+        self.lead = size * 1.02
 
     def resize(self, k):
         self._build(int(self.word.fnt.size * k))
@@ -405,19 +457,24 @@ class Title:
     def alive(self, t):
         return self.spec["start"] <= t < self.spec["end"]
 
+    def _draw(self, layer, cx, cy, t, t0, scale=1.0):
+        n = len(self.words)
+        for j, wd in enumerate(self.words):
+            dy = (j - (n - 1) / 2) * self.lead * scale
+            draw_blur_in(layer, wd, cx, cy + dy, t, t0 + j * 0.12, stagger=0.055, dur=0.65, scale=scale)
+
     def draw(self, layer, t):
         s = self.spec
         life = (t - s["start"]) / (s["end"] - s["start"])
         scale = 1.0 + 0.04 * life
         if s.get("punch") and t >= s["punch"]:
             scale *= 1 + 0.05 * math.exp(-(t - s["punch"]) / 0.15)
-        draw_blur_in(layer, self.word, self.pos[0], self.pos[1], t, s["start"],
-                     stagger=0.055, dur=0.65, scale=scale)
+        self._draw(layer, self.pos[0], self.pos[1], t, s["start"], scale)
 
     def alpha_footprint(self):
         """Final-state alpha (without shadow halo) and its offset from the centre point."""
         lay = Layer()
-        draw_blur_in(lay, self.word, W / 2, H / 2, 99, 0)
+        self._draw(lay, W / 2, H / 2, 99, 0)
         x0, y0, x1, y1 = lay.box
         a = lay.A[y0:y1, x0:x1].copy()
         a = np.where(a > 0.6, a, 0)
@@ -433,7 +490,8 @@ class Chapter:
 
     def __init__(self, spec):
         self.spec = spec
-        self.head = Scramble(f"{spec['num']} — {spec['time']}", mono(30, 500), WHITE, 0.5)
+        head = f"{spec['num']} — {spec['time']}" if spec["num"] else spec["time"]
+        self.head = Scramble(head, mono(30, 500), WHITE, 0.5)
         self.title = Word(spec["title"], sans(30, 600), WHITE, shadow=0.5, tracking=4.5, shadow_blur=6)
         self.coords = Scramble(spec["coords"], mono(26, 500), WHITE, 0.5) if spec["coords"] else None
 
@@ -471,11 +529,23 @@ class Intro:
         self.date = Scramble("27.09.2026", mono(28, 500), WHITE, 0.5)
         self.credit = Word("SENTINEL-2 CLOUDLESS 2021 © EOX · NASA BLUE MARBLE", sans(17, 500), WHITE, 0.5,
                            tracking=2, shadow_blur=4)
+        self.flights = FLIGHTS
+        self.flight_words = {txt: Word(txt, sans(30, 600), WHITE, 0.55, tracking=8, shadow_blur=8)
+                             for _, _, txt in FLIGHTS}
 
     def draw(self, layer, t, fi):
-        if 1.9 <= t < DROP:
-            a = 0.55 * clamp((t - 1.9) / 0.3) * (1 - clamp((t - (DROP - 0.3)) / 0.3))
-            draw_type_on(layer, self.credit, W / 2, 1488, t, 1.9, a, per=0.004, anchor="center")
+        for a0, b0 in MAP_RANGES:
+            s0 = max(a0, 1.9)
+            if s0 <= t < b0:
+                a = 0.55 * clamp((t - s0) / 0.3) * (1 - clamp((t - (b0 - 0.3)) / 0.3))
+                draw_type_on(layer, self.credit, W / 2, 1488, t, s0, a, per=0.004, anchor="center")
+        for a0, b0, text in self.flights:
+            if a0 <= t < b0:
+                wd = self.flight_words[text]
+                a = 1 - clamp((t - (b0 - 0.2)) / 0.2)
+                draw_type_on(layer, wd, W / 2, 318, t, a0 + 0.1, a, per=0.018, anchor="center")
+                half = wd.width() / 2 * expo_out((t - a0 - 0.2) / 0.6)
+                layer.line(W / 2 - half, 340, W / 2 + half, 340, 0.7 * a, 2)
         if t >= 2.0:
             return
         fade = 1 - clamp((t - 1.45) / 0.3)
@@ -500,30 +570,32 @@ class Intro:
 
 class EndCard:
     def __init__(self):
-        self.stops = [("ГАРНИ", 190), ("СЕВАН", 540), ("СЕВАНАВАНК", 890)]
+        self.stops = [("ЕРЕВАН", 150), ("ГАРНИ", 410), ("ГЕГАРД", 670), ("СЕВАН", 930)]
         self.names = [Word(n, sans(24, 600), WHITE, 0.5, tracking=4, shadow_blur=6) for n, _ in self.stops]
         # Stories have no "save" button for viewers, so the reel CTA is off by default
         cta = os.environ.get("CTA", "")
         self.cta = Word(cta, sans(28, 500), WHITE, 0.5, tracking=7, shadow_blur=6) if cta else None
 
     def draw(self, layer, t):
-        if t < 26.9:
+        t0 = END0 + 0.5
+        if t < t0 - 0.1:
             return
         y = 1215
         x0, x1 = self.stops[0][1], self.stops[-1][1]
-        lp = cubic_out((t - 27.0) / 1.0)
+        lp = cubic_out((t - t0) / 1.0)
         if lp > 0:
             layer.line(x0, y, x0 + (x1 - x0) * lp, y, 0.8, 2)
         for i, (name, x) in enumerate(self.stops):
             reach = (x - x0) / (x1 - x0)
-            t_reach = 27.0 + 1 - (1 - reach) ** (1 / 3)
+            t_reach = t0 + 1 - (1 - reach) ** (1 / 3)
             p = expo_out((t - t_reach + 0.04) / 0.4)
             if p > 0:
                 layer.dot(x, y, 7 * p + 3 * math.exp(-max(0, t - t_reach) / 0.12))
                 draw_type_on(layer, self.names[i], x, y + 52, t, t_reach, 1.0, per=0.012, anchor="center")
-        if self.cta and t > 28.1:
-            draw_type_on(layer, self.cta, W / 2, 1370, t, 28.1, 0.95, per=0.02, anchor="center")
-            half = self.cta.width() / 2 * expo_out((t - 28.1) / 0.8)
+        tc = END0 + 1.6
+        if self.cta and t > tc:
+            draw_type_on(layer, self.cta, W / 2, 1370, t, tc, 0.95, per=0.02, anchor="center")
+            half = self.cta.width() / 2 * expo_out((t - tc) / 0.8)
             layer.line(W / 2 - half, 1392, W / 2 + half, 1392, 0.6, 2)
 
 
@@ -653,8 +725,11 @@ def transition_fx(frame, fi):
 
 
 def beat_pulse(t):
-    if t < DROP or t >= 26.5:
+    if in_map(t) or t < 6.0 or t >= END0:
         return 1.0
+    if t < DROP:
+        b = math.floor(t / BEAT + 1e-6) * BEAT
+        return 1 + 0.012 * math.exp(-(t - b) / 0.11)
     b = math.floor(t / BEAT + 1e-6) * BEAT
     strong = abs(b / 2.0 - round(b / 2.0)) < 1e-6
     return 1 + (0.04 if strong else 0.022) * math.exp(-(t - b) / 0.11)
@@ -751,8 +826,8 @@ def depth_estimator():
 class SegmentReader:
     def __init__(self, clip, src_in):
         self.clip, self.src_in = clip, src_in
-        if clip == "map":
-            path, vf, self.fps = os.path.join(OUT, "map.mp4"), "null", 30
+        if clip.startswith("map"):
+            path, vf, self.fps = os.path.join(OUT, clip + ".mp4"), "null", 30
         else:
             path, vf, self.fps = os.path.join(WORK, "proxy", clip + ".mp4"), GRADE, 60
         self.proc = subprocess.Popen(
@@ -845,6 +920,8 @@ def place_titles(titles, seg):
     f = 6
     for tt in titles:
         s = tt.spec
+        if s.get("pos"):
+            continue
         masks = []
         t = s["start"] + 0.05
         while t < s["end"] - 0.02:
@@ -946,8 +1023,8 @@ def render_video(path):
 
         # 3) cut transitions, beat pulse, shake
         frame, post = transition_fx(frame, fi)
-        if 28.0 <= t < 28.2:
-            post["flash"] = max(post["flash"], 0.3 * (1 - (t - 28.0) / 0.2))
+        if END0 + 1.5 <= t < END0 + 1.7:
+            post["flash"] = max(post["flash"], 0.3 * (1 - (t - END0 - 1.5) / 0.2))
             post["shake"] = max(post["shake"], 0.6)
         shake = max(shake * 0.72, post["shake"])
         if shake > 0.05:
@@ -958,14 +1035,14 @@ def render_video(path):
             frame = affine(frame, beat_pulse(t))
 
         # 4) look
-        if t >= DROP:
+        if not in_map(t):
             frame = (frame.astype(np.float32) * VIGN).astype(np.uint8)
         if post["leak"] is not None:
             q, a = post["leak"]
             f = frame.astype(np.float32) / 255
             frame = ((1 - (1 - f) * (1 - light_leak(q) * a)) * 255).astype(np.uint8)
-        if t >= 26.5:
-            d = 0.22 * clamp((t - 26.5) / 0.4)
+        if t >= END0:
+            d = 0.22 * clamp((t - END0) / 0.4)
             frame = (frame.astype(np.float32) * (1 - d)).astype(np.uint8)
 
         # 5) chrome 3D word (rendered in Blender with alpha)
@@ -987,7 +1064,7 @@ def render_video(path):
             frame = hud.composite(frame)
 
         # 6) HUD text on top
-        vis = max([c.visibility(t) for c in chapters] + [clamp((t - 26.9) / 0.4)])
+        vis = max([c.visibility(t) for c in chapters] + [clamp((t - END0 - 0.4) / 0.4)])
         if vis > 0:
             frame = (frame.astype(np.float32) * (1 - SHADE * vis)).astype(np.uint8)
         intro.draw(hud, t, fi)
@@ -1010,11 +1087,14 @@ def render_video(path):
 
 
 # ---------------------------------------------------------------- 3D map intro
-def compose_map(path):
-    """Globe (frames 0-60) + terrain (45-180) Blender renders -> 6 s intro clip.
-    Adds a star field, denoises the low-sample renders and dives from one into the other."""
+MAP_CLIPS = {"mapA": range(0, 90), "mapB": range(1000, 1060), "mapC": range(2000, 2045), "mapD": range(3000, 3090)}
+
+
+def compose_maps():
+    """Blender renders -> the four flight clips. mapA also holds the globe (frames 0-60) and dives
+    from it into the terrain; the globe gets a 2D star field (much cheaper than rendering one)."""
     gdir = os.path.join(WORK, "render3d", "globe")
-    tdir = os.path.join(WORK, "render3d", "terrain")
+    rdir = os.path.join(WORK, "render3d", "route")
     rng = np.random.default_rng(11)
     ns = 1400
     sx, sy = rng.uniform(-1, 1, ns) * W * 0.9, rng.uniform(-1, 1, ns) * H * 0.9
@@ -1027,40 +1107,40 @@ def compose_map(path):
             im = cv2.fastNlMeansDenoisingColored(im, None, 3, 3, 5, 13)
         return cv2.resize(im, (W, H), interpolation=cv2.INTER_CUBIC)
 
-    enc = subprocess.Popen(
-        ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
-         "-r", "30", "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "13", "-pix_fmt", "yuv420p", path],
-        stdin=subprocess.PIPE)
-    for fi in range(180):
-        g = None
-        if fi <= 60:
-            g = load(os.path.join(gdir, f"{fi:04d}.png"))
-            zoom = 1 + 0.35 * fi / 60
-            stars = np.zeros((H, W), np.float32)
-            for x, y, b, ph in zip(sx, sy, sb, sph):
-                px, py = int(W / 2 + x * zoom), int(H / 2 + y * zoom)
-                if 0 <= px < W and 0 <= py < H:
-                    stars[py, px] = max(stars[py, px], b * (0.75 + 0.25 * math.sin(ph + fi * 0.3)))
-            stars = cv2.GaussianBlur(stars, (0, 0), 0.8) * 2.2
-            space = (g.max(2) < 14).astype(np.float32)
-            space = cv2.GaussianBlur(space, (0, 0), 2)
-            g = np.clip(g.astype(np.float32) + (stars * space)[..., None], 0, 255).astype(np.uint8)
-        if fi < 45:
-            out = g
-        else:
-            tf = load(os.path.join(tdir, f"{fi:04d}.png"))
-            if fi <= 60:
-                u = (fi - 45) / 15
-                w_ = u * u * (3 - 2 * u)
-                A = zoom_blur(g, 1 + 0.9 * u * u, 0.2 * u)
-                B = zoom_blur(tf, 1.0, 0.16 * (1 - u))
-                out = cv2.addWeighted(A, 1 - w_, B, w_, 0)
-                out = flash(out, 0.3 * math.sin(math.pi * u))
+    def globe(fi):
+        g = load(os.path.join(gdir, f"{fi:04d}.png"))
+        zoom = 1 + 0.35 * fi / 60
+        stars = np.zeros((H, W), np.float32)
+        for x, y, b, ph in zip(sx, sy, sb, sph):
+            px, py = int(W / 2 + x * zoom), int(H / 2 + y * zoom)
+            if 0 <= px < W and 0 <= py < H:
+                stars[py, px] = max(stars[py, px], b * (0.75 + 0.25 * math.sin(ph + fi * 0.3)))
+        stars = cv2.GaussianBlur(stars, (0, 0), 0.8) * 2.2
+        space = cv2.GaussianBlur((g.max(2) < 14).astype(np.float32), (0, 0), 2)
+        return np.clip(g.astype(np.float32) + (stars * space)[..., None], 0, 255).astype(np.uint8)
+
+    for name, rng_f in MAP_CLIPS.items():
+        path = os.path.join(OUT, name + ".mp4")
+        enc = subprocess.Popen(
+            ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
+             "-r", "30", "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "13", "-pix_fmt", "yuv420p",
+             path], stdin=subprocess.PIPE)
+        for fi in rng_f:
+            if name == "mapA" and fi < 45:
+                out = globe(fi)
             else:
-                out = tf
-        enc.stdin.write(np.ascontiguousarray(out).tobytes())
-    enc.stdin.close()
-    enc.wait()
+                tf = load(os.path.join(rdir, f"{fi:04d}.png"))
+                if name == "mapA" and fi <= 60:
+                    u = (fi - 45) / 15
+                    w_ = u * u * (3 - 2 * u)
+                    A = zoom_blur(globe(fi), 1 + 0.9 * u * u, 0.2 * u)
+                    B = zoom_blur(tf, 1.0, 0.16 * (1 - u))
+                    out = flash(cv2.addWeighted(A, 1 - w_, B, w_, 0), 0.3 * math.sin(math.pi * u))
+                else:
+                    out = tf
+            enc.stdin.write(np.ascontiguousarray(out).tobytes())
+        enc.stdin.close()
+        enc.wait()
 
 
 # ---------------------------------------------------------------- audio
@@ -1116,7 +1196,7 @@ def render_audio(path):
             place(whoosh(0.6, 0.85, 250, 4200, (0, 0), seed=i), cut, gain)
     place(whoosh(0.9, 0.8, 200, 3800, (0, 0), seed=91), 1.85, 0.3)            # dive into the terrain
     place(whoosh(0.5, 0.8, 300, 5000, (0.6, -0.6), seed=92), CHROME_AT + 0.5, 0.26)  # chrome word flies in
-    for at, g in ((DROP, 0.42), (18.0, 0.3), (28.0, 0.4)):
+    for at, g in ((6.0, 0.22), (14.5, 0.18), (DROP, 0.42), (32.0, 0.3), (END0 + 1.5, 0.4)):
         place(boom(), at, g)
     out = mix + sfx
     out = np.tanh(out / max(np.abs(out).max(), 1e-6) * 1.15) / np.tanh(1.15) * 0.93
@@ -1129,8 +1209,8 @@ if __name__ == "__main__":
     aud = os.path.join(OUT, "audio.wav")
     if only in ("", "audio"):
         render_audio(aud)
-    if only in ("", "video", "map") and (only == "map" or not os.path.exists(os.path.join(OUT, "map.mp4"))):
-        compose_map(os.path.join(OUT, "map.mp4"))
+    if only in ("", "video", "map") and (only == "map" or not os.path.exists(os.path.join(OUT, "mapD.mp4"))):
+        compose_maps()
     if only in ("", "video"):
         render_video(vid)
     if only == "":

@@ -292,7 +292,16 @@ def terrain_height_fn(h, meta):
     return f
 
 
-def build_terrain():
+PLACES.update({
+    "yerevan": (40.1776, 44.5126),
+    "garni_temple": (40.1125, 44.7302),
+    "geghard": (40.1403, 44.8183),
+    "sevan_beach": (40.558, 45.004),
+})
+
+
+def _terrain_setup():
+    """Satellite terrain, sky, sun, camera and a pin factory shared by the map scenes."""
     sc = reset_scene()
     meta = json.load(open(os.path.join(MAP, "meta.json")))
     h = np.load(os.path.join(MAP, "heights.npy"))
@@ -340,25 +349,90 @@ def build_terrain():
     sc.collection.objects.link(so)
 
     hf = terrain_height_fn(h, meta)
+    pin_mat = principled("pin", (1, 0.45, 0.08, 1), 0.3, emit=(1.0, 0.42, 0.06, 1), emit_strength=2.0)
+    beam_mat = principled("beam", (1, 1, 1, 1), 0.3, emit=(1, 0.85, 0.7, 1), emit_strength=1.2)
+    label_mat = principled("label", (0.96, 0.96, 0.96, 1), 0.35, emit=(1, 1, 1, 1), emit_strength=0.6)
+    font = os.path.join(FONTS, "Inter-ExtraBold.ttf")
+    cam = camera(58)
+
+    def pin(name, x, y, z, f_pop, text, size=2.6, f_hide=None, lift=3.6):
+        root = empty(name, (x, y, z))
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=0.2, location=(0, 0, 0.1))
+        ball = bpy.context.active_object
+        bpy.ops.object.shade_smooth()
+        ball.data.materials.append(pin_mat)
+        ball.parent = root
+        bpy.ops.mesh.primitive_cylinder_add(radius=0.03, depth=2.4, location=(0, 0, 1.2))
+        beam = bpy.context.active_object
+        beam.data.materials.append(beam_mat)
+        beam.parent = root
+        lab_root = empty(name + "_lab", (x, y, z + lift))
+        c = lab_root.constraints.new("LOCKED_TRACK")
+        c.target = cam
+        c.track_axis = "TRACK_Y"
+        c.lock_axis = "LOCK_Z"
+        t = text_obj(text, font, size, 0.35, 0.05, label_mat, name + "_text")
+        t.parent = lab_root
+        t.rotation_euler = (math.radians(90), 0, math.radians(180))
+        for ob, f in ((root, f_pop), (lab_root, f_pop + 3)):
+            key(ob, 0, scale=(0, 0, 0))
+            key(ob, f, scale=(0.001, 0.001, 0.001))
+            key(ob, f + 6, scale=(1.18, 1.18, 1.18))
+            key(ob, f + 10, scale=(0.94, 0.94, 0.94))
+            key(ob, f + 14, scale=(1, 1, 1))
+        if f_hide is not None:  # the label ducks away as the camera dives in
+            key(lab_root, f_hide - 6, scale=(1, 1, 1))
+            key(lab_root, f_hide, scale=(0.001, 0.001, 0.001))
+        return root
+
+    # mist toward the haze colour hides the edges of the tile area
+    sc.view_layers[0].use_pass_mist = True
+    sc.world.mist_settings.falloff = "QUADRATIC"
+    sc.use_nodes = True
+    nt = sc.node_tree
+    rl = nt.nodes["Render Layers"]
+    mix = nt.nodes.new("CompositorNodeMixRGB")
+    mix.inputs[2].default_value = (*haze, 1)
+    nt.links.new(rl.outputs["Mist"], mix.inputs["Fac"])
+    nt.links.new(rl.outputs["Image"], mix.inputs[1])
+    nt.links.new(mix.outputs[0], nt.nodes["Composite"].inputs["Image"])
+    sc.render.image_settings.color_mode = "RGB"
+    return sc, hf, cam, pin, font
+
+
+def mist_keys(sc, keys):
+    ms = sc.world.mist_settings
+    for f, start, depth in keys:
+        ms.start, ms.depth = start, depth
+        ms.keyframe_insert("start", frame=f)
+        ms.keyframe_insert("depth", frame=f)
+
+
+def route_arc(hf, a, b, lift, n=90):
+    pts = []
+    za, zb = hf(*a), hf(*b)
+    for i in range(n):
+        u = i / (n - 1)
+        lat = a[0] + (b[0] - a[0]) * u
+        lon = a[1] + (b[1] - a[1]) * u
+        x, y = xy(lat, lon)
+        z = max(za + (zb - za) * u + 0.25 + lift * math.sin(math.pi * u), hf(lat, lon) + 0.35)
+        pts.append((x, y, z))
+    return pts
+
+
+def build_terrain():
+    sc, hf, cam, pin, font = _terrain_setup()
     gx, gy = xy(*PLACES["garni"])
     sx, sy = xy(*PLACES["sevanavank"])
     gz, sz = hf(*PLACES["garni"]), hf(*PLACES["sevanavank"])
 
     # route: glowing arc Garni -> Sevanavank
-    n = 120
-    pts = []
-    for i in range(n):
-        u = i / (n - 1)
-        lat = PLACES["garni"][0] + (PLACES["sevanavank"][0] - PLACES["garni"][0]) * u
-        lon = PLACES["garni"][1] + (PLACES["sevanavank"][1] - PLACES["garni"][1]) * u
-        x, y = xy(lat, lon)
-        base = gz + (sz - gz) * u
-        z = max(base + 0.25 + 2.2 * math.sin(math.pi * u), hf(lat, lon) + 0.35)
-        pts.append((x, y, z))
+    pts = route_arc(hf, PLACES["garni"], PLACES["sevanavank"], 2.2, 120)
     cu = bpy.data.curves.new("route", "CURVE")
     cu.dimensions = "3D"
     sp = cu.splines.new("POLY")
-    sp.points.add(n - 1)
+    sp.points.add(len(pts) - 1)
     for p, c in zip(sp.points, pts):
         p.co = (*c, 1)
     cu.bevel_depth = 0.11
@@ -376,52 +450,9 @@ def build_terrain():
         kp.interpolation = "SINE"
         kp.easing = "EASE_IN_OUT"
 
-    pin_mat = principled("pin", (1, 0.45, 0.08, 1), 0.3, emit=(1.0, 0.42, 0.06, 1), emit_strength=2.0)
-    beam_mat = principled("beam", (1, 1, 1, 1), 0.3, emit=(1, 0.85, 0.7, 1), emit_strength=1.2)
-    label_mat = principled("label", (0.96, 0.96, 0.96, 1), 0.35, emit=(1, 1, 1, 1), emit_strength=0.6)
-    font = os.path.join(FONTS, "Inter-ExtraBold.ttf")
-    cam = camera(58)
-
-    def pin(name, x, y, z, f_pop, text):
-        root = empty(name, (x, y, z))
-        bpy.ops.mesh.primitive_uv_sphere_add(radius=0.2, location=(0, 0, 0.1))
-        ball = bpy.context.active_object
-        bpy.ops.object.shade_smooth()
-        ball.data.materials.append(pin_mat)
-        ball.parent = root
-        bpy.ops.mesh.primitive_cylinder_add(radius=0.03, depth=2.4, location=(0, 0, 1.2))
-        beam = bpy.context.active_object
-        beam.data.materials.append(beam_mat)
-        beam.parent = root
-        lab_root = empty(name + "_lab", (x, y, z + 3.6))
-        c = lab_root.constraints.new("LOCKED_TRACK")
-        c.target = cam
-        c.track_axis = "TRACK_Y"
-        c.lock_axis = "LOCK_Z"
-        t = text_obj(text, font, 2.6, 0.35, 0.05, label_mat, name + "_text")
-        t.parent = lab_root
-        t.rotation_euler = (math.radians(90), 0, math.radians(180))
-        for ob, f in ((root, f_pop), (lab_root, f_pop + 3)):
-            key(ob, 0, scale=(0, 0, 0))
-            key(ob, f, scale=(0.001, 0.001, 0.001))
-            key(ob, f + 6, scale=(1.18, 1.18, 1.18))
-            key(ob, f + 10, scale=(0.94, 0.94, 0.94))
-            key(ob, f + 14, scale=(1, 1, 1))
-        return root
-
     pin("garni", gx, gy, gz, 78, "ГАРНИ")
     pin("sevanavank", sx, sy, sz, 126, "СЕВАНАВАНК")
-    # lake name lying on the water
-    lx, ly = xy(*PLACES["lake"])
-    lz = hf(*PLACES["lake"]) + 0.05
-    lake_mat = principled("lake", (1, 1, 1, 1), 0.3, emit=(1, 1, 1, 1), emit_strength=1.2)
-    lake = text_obj("оз. Севан", font, 5.0, 0.12, 0.03, lake_mat, "lake")
-    lake.location = (lx, ly, lz)
-    lake.rotation_euler = (0, 0, math.radians(-14))
-    key(lake, 0, scale=(0, 0, 0))
-    key(lake, 98, scale=(0.001, 0.001, 0.001))
-    key(lake, 108, scale=(1.08, 1.08, 1.08))
-    key(lake, 114, scale=(1, 1, 1))
+    lake_label(sc, hf, font, 98)
 
     # camera path (map timeline frames: terrain visible from ~45)
     cx, cy = (gx + sx) / 2, (gy + sy) / 2
@@ -439,25 +470,108 @@ def build_terrain():
     key(tgt, 180, location=(gx, gy + 1.0, gz + 1.2))
     ease_all(cam)
     ease_all(tgt)
-
-    # mist toward the haze colour hides the edges of the tile area
-    sc.view_layers[0].use_pass_mist = True
-    ms = sc.world.mist_settings
-    ms.falloff = "QUADRATIC"
-    for f, start, depth in ((45, 400, 400), (70, 400, 400), (105, 45, 110)):
-        ms.start, ms.depth = start, depth
-        ms.keyframe_insert("start", frame=f)
-        ms.keyframe_insert("depth", frame=f)
-    sc.use_nodes = True
-    nt = sc.node_tree
-    rl = nt.nodes["Render Layers"]
-    mix = nt.nodes.new("CompositorNodeMixRGB")
-    mix.inputs[2].default_value = (*haze, 1)
-    nt.links.new(rl.outputs["Mist"], mix.inputs["Fac"])
-    nt.links.new(rl.outputs["Image"], mix.inputs[1])
-    nt.links.new(mix.outputs[0], nt.nodes["Composite"].inputs["Image"])
-    sc.render.image_settings.color_mode = "RGB"
+    mist_keys(sc, ((45, 400, 400), (70, 400, 400), (105, 45, 110)))
     frames(sc, 45, 180)
+
+
+def lake_label(sc, hf, font, f_pop):
+    lx, ly = xy(*PLACES["lake"])
+    lz = hf(*PLACES["lake"]) + 0.05
+    lake_mat = principled("lake", (1, 1, 1, 1), 0.3, emit=(1, 1, 1, 1), emit_strength=1.2)
+    lake = text_obj("оз. Севан", font, 5.0, 0.12, 0.03, lake_mat, "lake")
+    lake.location = (lx, ly, lz)
+    lake.rotation_euler = (0, 0, math.radians(-14))
+    key(lake, 0, scale=(0, 0, 0))
+    key(lake, f_pop, scale=(0.001, 0.001, 0.001))
+    key(lake, f_pop + 10, scale=(1.08, 1.08, 1.08))
+    key(lake, f_pop + 16, scale=(1, 1, 1))
+
+
+# frame ranges of the four flights in the "route" scene
+ROUTE_SEGMENTS = {"A": (45, 90), "B": (1000, 1059), "C": (2000, 2044), "D": (3000, 3089)}
+
+
+def build_route():
+    """Whole-day route: Yerevan -> Garni -> Geghard -> Sevan, flown in four separate shots."""
+    sc, hf, cam, pin, font = _terrain_setup()
+    P = {k: (*xy(*PLACES[k]), hf(*PLACES[k])) for k in ("yerevan", "garni_temple", "geghard", "sevan_beach")}
+    Yv, G, K, S = (Vector(P[k]) for k in ("yerevan", "garni_temple", "geghard", "sevan_beach"))
+
+    legs = [route_arc(hf, PLACES["yerevan"], PLACES["garni_temple"], 1.8),
+            route_arc(hf, PLACES["garni_temple"], PLACES["geghard"], 0.9, 50),
+            route_arc(hf, PLACES["geghard"], PLACES["sevan_beach"], 4.0, 140)]
+    pts = legs[0] + legs[1][1:] + legs[2][1:]
+    seglen = [0.0]
+    for p0, p1 in zip(pts, pts[1:]):
+        seglen.append(seglen[-1] + (Vector(p1) - Vector(p0)).length)
+    total = seglen[-1]
+    r1 = seglen[len(legs[0]) - 1] / total
+    r2 = seglen[len(legs[0]) + len(legs[1]) - 2] / total
+    cu = bpy.data.curves.new("route", "CURVE")
+    cu.dimensions = "3D"
+    sp = cu.splines.new("POLY")
+    sp.points.add(len(pts) - 1)
+    for p, c in zip(sp.points, pts):
+        p.co = (*c, 1)
+    cu.bevel_depth = 0.09
+    cu.bevel_resolution = 4
+    cu.use_fill_caps = True
+    cu.bevel_factor_mapping_end = "SPLINE"
+    route = bpy.data.objects.new("route", cu)
+    sc.collection.objects.link(route)
+    route.data.materials.append(principled("route", (1, 0.35, 0.04, 1), 0.3, emit=(1.0, 0.33, 0.04, 1),
+                                           emit_strength=1.6))
+    for f, v in ((0, 0.0), (1004, 0.0), (1036, r1), (2003, r1), (2022, r2), (3008, r2), (3062, 1.0)):
+        cu.bevel_factor_end = v
+        cu.keyframe_insert("bevel_factor_end", frame=f)
+    for kp in cu.animation_data.action.fcurves[0].keyframe_points:
+        kp.interpolation = "SINE"
+        kp.easing = "EASE_IN_OUT"
+
+    pin("yerevan", *Yv, 60, "ЕРЕВАН", f_hide=86)
+    pin("garni", *G, 1036, "ГАРНИ", size=1.9, f_hide=1057, lift=2.5)
+    pin("geghard", *K, 2022, "ГЕГАРД", size=1.9, f_hide=2043, lift=2.5)
+    pin("sevan", *S, 3062, "СЕВАН", f_hide=3087)
+    lake_label(sc, hf, font, 3032)
+
+    tgt = empty("tgt", (0, 0, 0))
+    track(cam, tgt)
+
+    def shot(keys):
+        """keys: [(frame, cam_pos, target_pos)] for one flight; eased inside, cut at the ends."""
+        for f, c, t in keys:
+            key(cam, f, location=tuple(c))
+            key(tgt, f, location=tuple(t))
+
+    def mid(a, b, k=0.5):
+        return a + (b - a) * k
+
+    V = Vector
+    shot([(45, V((0, -12, 120)), V((0, 0, 0))),
+          (68, Yv + V((-6, -24, 18)), Yv),
+          (90, Yv + V((-0.8, -4.5, 1.7)), Yv + V((0, 0, 0.2)))])
+    shot([(1000, Yv + V((-7, -15, 13)), mid(Yv, G, 0.3)),
+          (1032, mid(Yv, G, 0.55) + V((-3, -15, 10)), G),
+          (1059, G + V((-0.8, -4.5, 1.6)), G + V((0, 0, 0.2)))])
+    shot([(2000, G + V((-4, -10, 7)), mid(G, K, 0.4)),
+          (2024, mid(G, K, 0.6) + V((-2, -9, 5.5)), K),
+          (2044, K + V((-0.8, -4.5, 1.6)), K + V((0, 0, 0.2)))])
+    shot([(3000, K + V((-4, -11, 8)), K + V((3, 8, 0))),
+          (3030, mid(K, S, 0.25) + V((-10, -22, 30)), mid(K, S, 0.6)),
+          (3066, S + V((-6, -24, 16)), S),
+          (3089, S + V((-0.8, -4.8, 1.7)), S + V((0, 0, 0.2)))])
+    for ob in (cam, tgt):
+        for fc in ob.animation_data.action.fcurves:
+            for kp in fc.keyframe_points:
+                kp.interpolation = "BEZIER"
+                kp.easing = "EASE_IN_OUT"
+                kp.handle_left_type = kp.handle_right_type = "AUTO_CLAMPED"
+                if int(kp.co[0]) in (90, 1059, 2044):
+                    kp.interpolation = "CONSTANT"   # hard cut to the next flight
+    mist_keys(sc, ((45, 400, 400), (66, 400, 400), (88, 45, 110)))
+    seg = os.environ.get("SEG", "A")
+    a, b = ROUTE_SEGMENTS[seg]
+    frames(sc, a, b)
 
 
 # =============================================================================
@@ -510,5 +624,5 @@ def build_chrome():
 
 
 if __name__ == "__main__":
-    {"globe": build_globe, "terrain": build_terrain, "chrome": build_chrome}[PART]()
+    {"globe": build_globe, "terrain": build_terrain, "route": build_route, "chrome": build_chrome}[PART]()
     bpy.ops.render.render(animation=True)
