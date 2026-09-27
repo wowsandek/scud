@@ -1023,7 +1023,8 @@ def compose_map(path):
 
     def load(p):
         im = cv2.imread(p)
-        im = cv2.fastNlMeansDenoisingColored(im, None, 3, 3, 5, 13)
+        if os.environ.get("MAP_DENOISE"):  # only needed for low-sample Cycles renders
+            im = cv2.fastNlMeansDenoisingColored(im, None, 3, 3, 5, 13)
         return cv2.resize(im, (W, H), interpolation=cv2.INTER_CUBIC)
 
     enc = subprocess.Popen(

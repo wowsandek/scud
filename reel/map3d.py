@@ -55,6 +55,16 @@ def reset_scene():
     except Exception as e:  # build without OIDN
         print("denoiser unavailable:", e)
         sc.cycles.use_denoising = False
+    if os.environ.get("ENGINE") == "EEVEE":  # much faster on CPU-only machines (run under xvfb-run)
+        sc.render.engine = "BLENDER_EEVEE"
+        ee = sc.eevee
+        ee.taa_render_samples = int(os.environ.get("EEVEE_SAMPLES", "16"))
+        ee.use_soft_shadows = True
+        ee.shadow_cascade_size = "4096"
+        ee.use_gtao = True
+        ee.gtao_distance = 2.0
+        ee.use_bloom = True
+        ee.bloom_intensity = 0.04
     sc.render.resolution_x, sc.render.resolution_y = 1080, 1920
     sc.render.resolution_percentage = SCALE
     sc.render.fps = 30
@@ -325,6 +335,8 @@ def build_terrain():
     sun.color = (1.0, 0.93, 0.82)
     so = bpy.data.objects.new("sun", sun)
     so.rotation_euler = (math.radians(58), 0, math.radians(-120))  # low sun from the south-west
+    sun.shadow_cascade_max_distance = 400
+    sun.shadow_cascade_count = 4
     sc.collection.objects.link(so)
 
     hf = terrain_height_fn(h, meta)
