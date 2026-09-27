@@ -26,6 +26,7 @@ from scipy import signal
 from scipy.io import wavfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from parallax import DepthEstimator, warp as parallax_warp  # noqa: E402
 from sky import SkySegmenter  # noqa: E402
 
 WORK = sys.argv[1] if len(sys.argv) > 1 else "."
@@ -34,9 +35,10 @@ os.makedirs(OUT, exist_ok=True)
 
 W, H, FPS = 1080, 1920, 30
 BEAT = 0.5
-DUR = 27.5
+DUR = 29.5
 NFRAMES = int(DUR * FPS)
-MUSIC_START = 50.1336  # track time of reel t=0 (bar start, drop lands at t=4.0)
+MUSIC_START = 48.1336  # track time of reel t=0 (bar start, drop lands at t=6.0)
+DROP = 6.0
 SR = 44100
 
 WHITE = (255, 255, 255)
@@ -53,63 +55,65 @@ F_MONO = "JetBrainsMono.ttf"
 # ---------------------------------------------------------------- edit list
 # clip, source in-point, reel start, reel duration, speed ramp [(dur, speed)]
 SEGMENTS = [
-    ("c4", 0.30, 0.0, 2.0, [(2.0, 1.0)]),            # intro: Sevan from above
-    ("c3", 23.0, 2.0, 2.0, [(1.5, 1.0), (0.5, 1.6)]),  # intro: jet ski, sun
-    ("c1", 7.45, 4.0, 1.5, [(1.5, 1.0)]),            # 01 Garni — title behind the cliff
-    ("c1", 0.50, 5.5, 1.0, [(1.0, 1.5)]),
-    ("c1", 4.60, 6.5, 0.5, [(0.5, 1.5)]),
-    ("c1", 13.0, 7.0, 1.0, [(1.0, 1.2)]),
-    ("c2", 1.60, 8.0, 1.5, [(1.5, 1.3)]),            # 02 Sevan — title in the sky
-    ("c2", 17.0, 9.5, 1.5, [(1.5, 1.0)]),
-    ("c3", 12.8, 11.0, 1.5, [(1.5, 1.5)]),           # 03 jet ski
-    ("c3", 26.6, 12.5, 1.0, [(1.0, 1.5)]),
-    ("c3", 41.0, 13.5, 2.5, [(0.5, 2.0), (1.5, 0.5), (0.5, 2.0)]),
-    ("c4", 11.35, 16.0, 2.0, [(2.0, 0.75)]),         # 04 Sevanavank — title behind the church
-    ("c2", 12.4, 18.0, 1.0, [(1.0, 1.2)]),
-    ("c4", 4.50, 19.0, 1.0, [(1.0, 1.5)]),
-    ("c5", 15.4, 20.0, 2.0, [(2.0, 1.0)]),           # 05 peninsula
-    ("c5", 17.4, 22.0, 2.5, [(2.5, 0.78)]),
-    ("c5", 3.00, 24.5, 3.0, [(3.0, 0.9)]),           # end card — title behind the ridge
+    ("map", 0.0, 0.0, 6.0, [(6.0, 1.0)]),            # 3D globe + terrain flyover (map3d.py)
+    ("c1", 7.45, 6.0, 1.5, [(1.5, 1.0)]),            # 01 Garni — title behind the cliff (drop)
+    ("c1", 0.50, 7.5, 1.0, [(1.0, 1.5)]),
+    ("c1", 4.60, 8.5, 0.5, [(0.5, 1.5)]),
+    ("c1", 13.0, 9.0, 1.0, [(1.0, 1.2)]),
+    ("c2", 1.60, 10.0, 1.5, [(1.5, 1.3)]),           # 02 Sevan — title in the sky
+    ("c2", 17.0, 11.5, 1.5, [(1.5, 1.0)]),
+    ("c3", 12.8, 13.0, 1.5, [(1.5, 1.5)]),           # 03 jet ski (+ chrome 3D word)
+    ("c3", 26.6, 14.5, 1.0, [(1.0, 1.5)]),
+    ("c3", 41.0, 15.5, 2.5, [(0.5, 2.0), (1.5, 0.5), (0.5, 2.0)]),
+    # 04 Sevanavank — frozen frame, 3D orbit around the church, title behind it
+    ("c4", 11.9, 18.0, 2.0, [], dict(zoom=(1.03, 1.11), kz=0.08, tx=(48, -48), ty=(-8, 8))),
+    ("c2", 12.4, 20.0, 1.0, [(1.0, 1.2)]),
+    ("c4", 4.50, 21.0, 1.0, [(1.0, 1.5)]),
+    ("c5", 15.4, 22.0, 2.0, [(2.0, 1.0)]),           # 05 peninsula
+    ("c5", 17.4, 24.0, 2.5, [(2.5, 0.78)]),
+    # end card — frozen panorama, 3D push-in, title behind the ridge
+    ("c5", 4.3, 26.5, 3.0, [], dict(zoom=(1.0, 1.08), kz=0.13, tx=(10, -18), ty=(0, -12))),
 ]
 
 TRANSITIONS = {
-    2.0: dict(kind="zoom", amp=0.25, n=(3, 3)),
-    4.0: dict(kind="zoom", amp=0.55, n=(4, 5), flash=0.7, shake=1.0),
-    5.5: dict(kind="whip", dir=(0, -1)),
-    6.5: dict(kind="whip", dir=(-1, 0)),
-    7.0: dict(kind="zoom", amp=0.4, n=(3, 4), shake=0.4),
-    8.0: dict(kind="spin"),
-    9.5: dict(kind="whip", dir=(-1, 0)),
-    11.0: dict(kind="zoom", amp=0.5, n=(4, 4), shake=0.6),
-    12.5: dict(kind="whip", dir=(1, 0)),
-    13.5: dict(kind="zoom", amp=0.4, n=(3, 4), shake=0.5),
-    16.0: dict(kind="zoom", amp=0.5, n=(4, 5), flash=0.35, shake=0.8),
-    18.0: dict(kind="whip", dir=(0, -1)),
-    19.0: dict(kind="whip", dir=(-1, 0)),
-    20.0: dict(kind="leak"),
-    22.0: dict(kind="whip", dir=(-1, 0)),
-    24.5: dict(kind="leak"),
+    DROP: dict(kind="zoom", amp=0.55, n=(4, 5), flash=0.7, shake=1.0),
+    7.5: dict(kind="whip", dir=(0, -1)),
+    8.5: dict(kind="whip", dir=(-1, 0)),
+    9.0: dict(kind="zoom", amp=0.4, n=(3, 4), shake=0.4),
+    10.0: dict(kind="cube", axis="y", n=5),
+    11.5: dict(kind="whip", dir=(-1, 0)),
+    13.0: dict(kind="cube", axis="x", n=5),
+    14.5: dict(kind="whip", dir=(1, 0)),
+    15.5: dict(kind="zoom", amp=0.4, n=(3, 4), shake=0.5),
+    18.0: dict(kind="zoom", amp=0.5, n=(4, 5), flash=0.35, shake=0.8),
+    20.0: dict(kind="whip", dir=(0, -1)),
+    21.0: dict(kind="whip", dir=(-1, 0)),
+    22.0: dict(kind="flip", n=6),
+    24.0: dict(kind="whip", dir=(-1, 0)),
+    26.5: dict(kind="leak"),
 }
 
 # big serif titles living "in the scene" (under transitions); depth => behind non-sky
 TITLES = [
-    dict(text="Гарни", start=4.05, end=5.5, size=250, depth=True),
-    dict(text="Севан", start=8.05, end=9.5, size=250, depth=True),
-    dict(text="Севанаванк", start=16.05, end=18.0, size=190, depth=True, vis=0.95),
-    dict(text="Армения", start=24.6, end=27.5, size=235, depth=True, punch=26.0, vis=0.88),
+    dict(text="Гарни", start=6.05, end=7.5, size=250, depth=True),
+    dict(text="Севан", start=10.05, end=11.5, size=250, depth=True),
+    dict(text="Севанаванк", start=18.05, end=20.0, size=190, depth=True, vis=0.95),
+    dict(text="Армения", start=26.6, end=29.5, size=235, depth=True, punch=28.0, vis=0.88),
 ]
 
 CHAPTERS = [
-    dict(start=4.15, end=7.92, num="01", time="11:56", title="ГАРНИ · СИМФОНИЯ КАМНЕЙ",
+    dict(start=6.15, end=9.92, num="01", time="11:56", title="ГАРНИ · СИМФОНИЯ КАМНЕЙ",
          coords="40.11° N  44.73° E"),
-    dict(start=8.15, end=10.92, num="02", time="14:50", title="ОЗЕРО СЕВАН · 1900 М",
+    dict(start=10.15, end=12.92, num="02", time="14:50", title="ОЗЕРО СЕВАН · 1900 М",
          coords="40.55° N  45.00° E"),
-    dict(start=11.15, end=15.92, num="03", time="15:26", title="ГИДРОЦИКЛ ПО СЕВАНУ", coords=None),
-    dict(start=16.15, end=19.92, num="04", time="16:03", title="СЕВАНАВАНК · IX ВЕК",
+    dict(start=13.15, end=17.92, num="03", time="15:26", title="ГИДРОЦИКЛ ПО СЕВАНУ", coords=None),
+    dict(start=18.15, end=21.92, num="04", time="16:03", title="СЕВАНАВАНК · IX ВЕК",
          coords="40.56° N  45.01° E"),
-    dict(start=20.15, end=24.42, num="05", time="16:22", title="ПОЛУОСТРОВ СЕВАН", coords=None),
+    dict(start=22.15, end=26.42, num="05", time="16:22", title="ПОЛУОСТРОВ СЕВАН", coords=None),
 ]
 
+CHROME_AT = 13.1      # chrome 3D word (map3d.py chrome), frames 0..72
+CHROME_DY = -330      # shift up from frame centre
 
 # ---------------------------------------------------------------- easing
 def clamp(x, a=0.0, b=1.0):
@@ -456,6 +460,8 @@ class Chapter:
 
 
 class Intro:
+    """Title over the 3D globe, gone before the dive into the terrain."""
+
     def __init__(self):
         self.kicker = Word("ОДИН ДЕНЬ", sans(34, 500), WHITE, shadow=0.5, tracking=14, shadow_blur=8)
         f = serif(186)
@@ -463,30 +469,33 @@ class Intro:
             f = serif(f.size - 6)
         self.title = Word("в Армении", f, WHITE, shadow=0.42, tracking=2, shadow_blur=16)
         self.date = Scramble("27.09.2026", mono(28, 500), WHITE, 0.5)
+        self.credit = Word("SENTINEL-2 CLOUDLESS 2021 © EOX · NASA BLUE MARBLE", sans(17, 500), WHITE, 0.5,
+                           tracking=2, shadow_blur=4)
 
     def draw(self, layer, t, fi):
-        if t >= 4.0:
+        if 1.9 <= t < DROP:
+            a = 0.55 * clamp((t - 1.9) / 0.3) * (1 - clamp((t - (DROP - 0.3)) / 0.3))
+            draw_type_on(layer, self.credit, W / 2, 1488, t, 1.9, a, per=0.004, anchor="center")
+        if t >= 2.0:
             return
-        fade = 1 - clamp((t - 3.5) / 0.35)
-        # kicker with tracking that tightens, flanked by growing hairlines
-        kp = expo_out((t - 0.05) / 0.9)
+        fade = 1 - clamp((t - 1.45) / 0.3)
+        kp = expo_out((t - 0.15) / 0.9)
         tr = 40 - 26 * kp
         width = self.kicker.width(tr)
         xs = self.kicker.origins(W / 2 - width / 2, tr)
-        ky = 760
+        ky = 330
         for i, (spr, pad) in enumerate(self.kicker.glyphs):
             if self.kicker.text[i] != " ":
                 layer.draw(spr, xs[i] - pad, ky - self.kicker.asc - pad, clamp(kp * 1.4) * fade)
-        lp = expo_out((t - 0.3) / 0.8)
+        lp = expo_out((t - 0.35) / 0.8)
         gap, ln = 26, 110 * lp
         ly = ky - 13
         layer.line(W / 2 - width / 2 - gap - ln, ly, W / 2 - width / 2 - gap, ly, 0.8 * fade, 2)
         layer.line(W / 2 + width / 2 + gap, ly, W / 2 + width / 2 + gap + ln, ly, 0.8 * fade, 2)
-        # big serif line; grows slowly, blurs out into the drop
-        scale = 1 + 0.05 * clamp(t / 3.5)
-        draw_blur_in(layer, self.title, W / 2, 890, t, 0.35, stagger=0.06, dur=0.7, scale=scale,
-                     exit_t=3.55, exit_dur=0.4)
-        self.date.draw(layer, W / 2, 1060, t, 1.0, fi, 0.85 * fade, anchor="center")
+        scale = 1 + 0.06 * clamp(t / 1.9)
+        draw_blur_in(layer, self.title, W / 2, 455, t, 0.4, stagger=0.05, dur=0.6, scale=scale,
+                     exit_t=1.5, exit_dur=0.35)
+        self.date.draw(layer, W / 2, 598, t, 0.9, fi, 0.85 * fade, anchor="center")
 
 
 class EndCard:
@@ -498,23 +507,23 @@ class EndCard:
         self.cta = Word(cta, sans(28, 500), WHITE, 0.5, tracking=7, shadow_blur=6) if cta else None
 
     def draw(self, layer, t):
-        if t < 24.9:
+        if t < 26.9:
             return
         y = 1215
         x0, x1 = self.stops[0][1], self.stops[-1][1]
-        lp = cubic_out((t - 25.0) / 1.0)
+        lp = cubic_out((t - 27.0) / 1.0)
         if lp > 0:
             layer.line(x0, y, x0 + (x1 - x0) * lp, y, 0.8, 2)
         for i, (name, x) in enumerate(self.stops):
             reach = (x - x0) / (x1 - x0)
-            t_reach = 25.0 + 1 - (1 - reach) ** (1 / 3)
+            t_reach = 27.0 + 1 - (1 - reach) ** (1 / 3)
             p = expo_out((t - t_reach + 0.04) / 0.4)
             if p > 0:
                 layer.dot(x, y, 7 * p + 3 * math.exp(-max(0, t - t_reach) / 0.12))
                 draw_type_on(layer, self.names[i], x, y + 52, t, t_reach, 1.0, per=0.012, anchor="center")
-        if self.cta and t > 26.1:
-            draw_type_on(layer, self.cta, W / 2, 1370, t, 26.1, 0.95, per=0.02, anchor="center")
-            half = self.cta.width() / 2 * expo_out((t - 26.1) / 0.8)
+        if self.cta and t > 28.1:
+            draw_type_on(layer, self.cta, W / 2, 1370, t, 28.1, 0.95, per=0.02, anchor="center")
+            half = self.cta.width() / 2 * expo_out((t - 28.1) / 0.8)
             layer.line(W / 2 - half, 1392, W / 2 + half, 1392, 0.6, 2)
 
 
@@ -585,7 +594,6 @@ def build_bottom_shade():
 
 VIGN = build_vignette()
 SHADE = build_bottom_shade()
-INTRO_BAND = (1 - 0.28 * np.exp(-((np.arange(H, dtype=np.float32) - 900) / 420) ** 2))[:, None, None]
 _grain_rng = np.random.default_rng(7)
 GRAIN = [cv2.resize(_grain_rng.normal(0, 4.2, (H // 2, W // 2)).astype(np.float32), (W, H))
          for _ in range(6)]
@@ -645,27 +653,117 @@ def transition_fx(frame, fi):
 
 
 def beat_pulse(t):
-    if t < 4.0 or t >= 24.5:
+    if t < DROP or t >= 26.5:
         return 1.0
     b = math.floor(t / BEAT + 1e-6) * BEAT
     strong = abs(b / 2.0 - round(b / 2.0)) < 1e-6
     return 1 + (0.04 if strong else 0.022) * math.exp(-(t - b) / 0.11)
 
 
+# ---------------------------------------------------------------- 3D transitions
+def _project(pts, f, z_off):
+    """Pinhole projection of Nx3 points (camera at origin looking +z, y down)."""
+    z = pts[:, 2] + z_off
+    return np.stack([W / 2 + f * pts[:, 0] / z, H / 2 + f * pts[:, 1] / z], 1).astype(np.float32)
+
+
+def _backdrop(A, B, e):
+    small = cv2.resize(cv2.addWeighted(A, 1 - e, B, e, 0), (W // 8, H // 8), interpolation=cv2.INTER_AREA)
+    return (cv2.resize(cv2.GaussianBlur(small, (0, 0), 6), (W, H)).astype(np.float32) * 0.35).astype(np.uint8)
+
+
+def _paint_face(canvas, img, quad, shade):
+    src = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
+    M = cv2.getPerspectiveTransform(src, quad)
+    face = cv2.warpPerspective(img, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    m = cv2.warpPerspective(np.full((H, W), 255, np.uint8), M, (W, H), flags=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_CONSTANT).astype(np.float32)[..., None] / 255
+    return (canvas * (1 - m) + face.astype(np.float32) * shade * m).astype(np.uint8)
+
+
+def box_transition(A, B, p, axis):
+    """A on the front face of a box that turns 90 degrees to show B on the next face.
+    axis 'y': A leaves to the left, B arrives from the right; 'x': A goes up, B from below."""
+    e = 0.5 - 0.5 * math.cos(math.pi * clamp(p))
+    th = e * math.pi / 2
+    depth = W if axis == "y" else H
+    f = 2.2 * depth                       # front face fills the frame at rest
+    z_off = f + depth / 2 + 0.45 * depth * math.sin(math.pi * e)   # dolly out mid-turn
+    hw, hh, hd = W / 2, H / 2, depth / 2
+    front = np.array([[-hw, -hh, -hd], [hw, -hh, -hd], [hw, hh, -hd], [-hw, hh, -hd]], np.float64)
+    if axis == "y":
+        def rot(v, a):
+            ca, sa = math.cos(a), math.sin(a)
+            return np.stack([v[:, 0] * ca + v[:, 2] * sa, v[:, 1], -v[:, 0] * sa + v[:, 2] * ca], 1)
+    else:
+        def rot(v, a):
+            ca, sa = math.cos(a), math.sin(a)
+            return np.stack([v[:, 0], v[:, 1] * ca + v[:, 2] * sa, -v[:, 1] * sa + v[:, 2] * ca], 1)
+    faces = [(A, rot(front, th)), (B, rot(rot(front, -math.pi / 2), th))]
+    out = _backdrop(A, B, e)
+    order = sorted(faces, key=lambda fc: -fc[1][:, 2].mean())   # far first
+    for img, pts in order:
+        n = np.cross(pts[1] - pts[0], pts[3] - pts[0])
+        centre = pts.mean(0) + np.array([0, 0, z_off])
+        if np.dot(n, centre) <= 0:        # n points into the box: visible when it points away from us
+            continue
+        cosang = abs(np.dot(n / np.linalg.norm(n), centre / np.linalg.norm(centre)))
+        out = _paint_face(out, img, _project(pts, f, z_off), 0.45 + 0.55 * cosang)
+    return out
+
+
+def flip_transition(A, B, p):
+    """Card flip around the horizontal axis with a dolly out; A on the front, B on the back."""
+    e = 0.5 - 0.5 * math.cos(math.pi * clamp(p))
+    th = e * math.pi
+    f = 2.4 * H
+    z_off = f + 0.5 * H * math.sin(math.pi * e)
+    hw, hh = W / 2, H / 2
+    card = np.array([[-hw, -hh, 0], [hw, -hh, 0], [hw, hh, 0], [-hw, hh, 0]], np.float64)
+    img = A if th < math.pi / 2 else B
+    a = th if th < math.pi / 2 else th - math.pi
+    ca, sa = math.cos(a), math.sin(a)
+    pts = np.stack([card[:, 0], card[:, 1] * ca, card[:, 1] * sa], 1)
+    out = _backdrop(A, B, e)
+    return _paint_face(out, img, _project(pts, f, z_off), 0.5 + 0.5 * abs(ca))
+
+
 # ---------------------------------------------------------------- sources
+_SEG = None
+_DEPTH = None
+
+
+def sky_segmenter():
+    global _SEG
+    if _SEG is None:
+        _SEG = SkySegmenter(os.path.join(WORK, "models", "segformer_b2.onnx"), os.path.join(WORK, "skycache"))
+    return _SEG
+
+
+def depth_estimator():
+    global _DEPTH
+    if _DEPTH is None:
+        _DEPTH = DepthEstimator(os.path.join(WORK, "models", "depth_anything_v2_small.onnx"),
+                                os.path.join(WORK, "depthcache"))
+    return _DEPTH
+
+
 class SegmentReader:
     def __init__(self, clip, src_in):
         self.clip, self.src_in = clip, src_in
-        path = os.path.join(WORK, "proxy", clip + ".mp4")
+        if clip == "map":
+            path, vf, self.fps = os.path.join(OUT, "map.mp4"), "null", 30
+        else:
+            path, vf, self.fps = os.path.join(WORK, "proxy", clip + ".mp4"), GRADE, 60
         self.proc = subprocess.Popen(
-            ["ffmpeg", "-v", "error", "-ss", f"{src_in:.3f}", "-i", path, "-vf", GRADE, "-an",
+            ["ffmpeg", "-v", "error", "-ss", f"{src_in:.3f}", "-i", path, "-vf", vf, "-an",
              "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=W * H * 3 * 4)
         self.idx = -1
         self.frame = None
 
     def get(self, src_t):
-        want = max(0, int(round((src_t - self.src_in) * 60)))
+        want = max(0, int(round((src_t - self.src_in) * self.fps)))
         while self.idx < want:
             buf = self.proc.stdout.read(W * H * 3)
             if len(buf) < W * H * 3:
@@ -699,15 +797,38 @@ def seg_at(t):
 
 
 class FrameSource:
+    """Frames of the edit at reel time t; frozen segments get a depth-parallax camera move."""
+
     def __init__(self):
         self.reader, self.cur = None, None
+        self.still = None
 
     def get(self, t):
         seg = seg_at(t)
         if seg is not self.cur:
             if self.reader:
                 self.reader.close()
-            self.reader, self.cur = SegmentReader(seg[0], seg[1]), seg
+                self.reader = None
+            self.cur = seg
+            if len(seg) > 5:
+                r = SegmentReader(seg[0], seg[1])
+                img = r.get(seg[1])
+                r.close()
+                k = f"{seg[0]}:{seg[1]:.3f}:still"
+                disp = depth_estimator().disparity(img, k, sky_segmenter().mask(img, k))
+                self.still = (img, disp)
+            else:
+                self.reader = SegmentReader(seg[0], seg[1])
+        if len(seg) > 5:
+            mv = seg[5]
+            u = clamp((t - seg[2]) / seg[3])
+            e = 0.5 - 0.5 * math.cos(math.pi * u)
+
+            def lerp(v):
+                return v[0] + (v[1] - v[0]) * e if isinstance(v, tuple) else v
+            img, disp = self.still
+            frame = parallax_warp(img, disp, lerp(mv["zoom"]), mv["kz"], lerp(mv["tx"]), lerp(mv["ty"]))
+            return frame, f"{seg[0]}:{seg[1]:.3f}:f3d:{int(round(u * 1000))}"
         return self.reader.get(src_time(seg, t - seg[2])), self.reader.key()
 
     def close(self):
@@ -774,12 +895,14 @@ def place_titles(titles, seg):
 
 # ---------------------------------------------------------------- render
 def render_video(path):
-    seg = SkySegmenter(os.path.join(WORK, "models", "segformer_b2.onnx"), os.path.join(WORK, "skycache"))
+    seg = sky_segmenter()
     titles = [Title(s) for s in TITLES]
     place_titles(titles, seg)
     chapters = [Chapter(c) for c in CHAPTERS]
     intro, end = Intro(), EndCard()
     scene, hud = Layer(), Layer()
+    boxes = {int(round(c * FPS)): tr for c, tr in TRANSITIONS.items() if tr["kind"] in ("cube", "flip")}
+    held, peeked = {}, {}
     enc = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
          "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "17",
@@ -787,6 +910,7 @@ def render_video(path):
          "-movflags", "+faststart", path], stdin=subprocess.PIPE)
     src = FrameSource()
     shake = 0.0
+    chrome_f0 = int(round(CHROME_AT * FPS))
     frames = range(NFRAMES)
     if os.environ.get("FRAMES"):
         a, b = (int(v) for v in os.environ["FRAMES"].split(":"))
@@ -802,15 +926,28 @@ def render_video(path):
                 tt.draw(scene, t)
             mask = seg.mask(frame, key) if any(tt.spec["depth"] for tt in live) else None
             frame = scene.composite(frame, mask)
-        if t < 4.0:
-            frame = (frame.astype(np.float32) * INTRO_BAND).astype(np.uint8)
-            intro.draw(scene, t, fi)
-            frame = scene.composite(frame)
 
-        # 2) transitions, beat pulse, shake
+        # 2) 3D box / flip transitions need both shots at once
+        for cf, tr in boxes.items():
+            n = tr["n"]
+            if fi == cf - 1:
+                held[cf] = frame.copy()
+            if cf - n <= fi < cf + n:
+                if fi < cf:
+                    if cf not in peeked:
+                        ps = FrameSource()
+                        peeked[cf] = ps.get(cf / FPS)[0]
+                        ps.close()
+                    A, B = frame, peeked[cf]
+                else:
+                    A, B = held.get(cf, frame), frame
+                p = (fi - (cf - n) + 0.5) / (2 * n)
+                frame = box_transition(A, B, p, tr["axis"]) if tr["kind"] == "cube" else flip_transition(A, B, p)
+
+        # 3) cut transitions, beat pulse, shake
         frame, post = transition_fx(frame, fi)
-        if 26.0 <= t < 26.2:
-            post["flash"] = max(post["flash"], 0.3 * (1 - (t - 26.0) / 0.2))
+        if 28.0 <= t < 28.2:
+            post["flash"] = max(post["flash"], 0.3 * (1 - (t - 28.0) / 0.2))
             post["shake"] = max(post["shake"], 0.6)
         shake = max(shake * 0.72, post["shake"])
         if shake > 0.05:
@@ -820,26 +957,41 @@ def render_video(path):
         else:
             frame = affine(frame, beat_pulse(t))
 
-        # 3) look
-        frame = (frame.astype(np.float32) * VIGN).astype(np.uint8)
+        # 4) look
+        if t >= DROP:
+            frame = (frame.astype(np.float32) * VIGN).astype(np.uint8)
         if post["leak"] is not None:
             q, a = post["leak"]
             f = frame.astype(np.float32) / 255
             frame = ((1 - (1 - f) * (1 - light_leak(q) * a)) * 255).astype(np.uint8)
-        if t >= 24.5:
-            d = 0.22 * clamp((t - 24.5) / 0.4)
+        if t >= 26.5:
+            d = 0.22 * clamp((t - 26.5) / 0.4)
             frame = (frame.astype(np.float32) * (1 - d)).astype(np.uint8)
 
-        # 4) HUD text on top
-        vis = max([c.visibility(t) for c in chapters] + [clamp((t - 24.9) / 0.4)])
+        # 5) chrome 3D word (rendered in Blender with alpha)
+        ci = fi - chrome_f0
+        cpath = os.path.join(WORK, "render3d", "chrome", f"{ci:04d}.png")
+        if 0 <= ci and os.path.exists(cpath):
+            spr = cv2.imread(cpath, cv2.IMREAD_UNCHANGED).astype(np.float32)
+            if spr.shape[:2] != (H, W):
+                spr = cv2.resize(spr, (W, H))
+            spr = np.roll(spr, CHROME_DY, axis=0)
+            if CHROME_DY < 0:
+                spr[CHROME_DY:] = 0
+            hud.draw(spr, 0, 0)
+            frame = hud.composite(frame)
+
+        # 6) HUD text on top
+        vis = max([c.visibility(t) for c in chapters] + [clamp((t - 26.9) / 0.4)])
         if vis > 0:
             frame = (frame.astype(np.float32) * (1 - SHADE * vis)).astype(np.uint8)
+        intro.draw(hud, t, fi)
         for c in chapters:
             c.draw(hud, t, fi)
         end.draw(hud, t)
         frame = hud.composite(frame)
 
-        # 5) post
+        # 7) post
         if post["rgb"] > 0.5:
             frame = rgb_split(frame, post["rgb"])
         frame = flash(frame, post["flash"])
@@ -848,6 +1000,59 @@ def render_video(path):
         if fi % 60 == 0:
             print(f"frame {fi}/{NFRAMES}", flush=True)
     src.close()
+    enc.stdin.close()
+    enc.wait()
+
+
+# ---------------------------------------------------------------- 3D map intro
+def compose_map(path):
+    """Globe (frames 0-60) + terrain (45-180) Blender renders -> 6 s intro clip.
+    Adds a star field, denoises the low-sample renders and dives from one into the other."""
+    gdir = os.path.join(WORK, "render3d", "globe")
+    tdir = os.path.join(WORK, "render3d", "terrain")
+    rng = np.random.default_rng(11)
+    ns = 1400
+    sx, sy = rng.uniform(-1, 1, ns) * W * 0.9, rng.uniform(-1, 1, ns) * H * 0.9
+    sb = rng.uniform(0, 1, ns) ** 3 * 255
+    sph = rng.uniform(0, 6.28, ns)
+
+    def load(p):
+        im = cv2.imread(p)
+        im = cv2.fastNlMeansDenoisingColored(im, None, 3, 3, 5, 13)
+        return cv2.resize(im, (W, H), interpolation=cv2.INTER_CUBIC)
+
+    enc = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}",
+         "-r", "30", "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "13", "-pix_fmt", "yuv420p", path],
+        stdin=subprocess.PIPE)
+    for fi in range(180):
+        g = None
+        if fi <= 60:
+            g = load(os.path.join(gdir, f"{fi:04d}.png"))
+            zoom = 1 + 0.35 * fi / 60
+            stars = np.zeros((H, W), np.float32)
+            for x, y, b, ph in zip(sx, sy, sb, sph):
+                px, py = int(W / 2 + x * zoom), int(H / 2 + y * zoom)
+                if 0 <= px < W and 0 <= py < H:
+                    stars[py, px] = max(stars[py, px], b * (0.75 + 0.25 * math.sin(ph + fi * 0.3)))
+            stars = cv2.GaussianBlur(stars, (0, 0), 0.8) * 2.2
+            space = (g.max(2) < 14).astype(np.float32)
+            space = cv2.GaussianBlur(space, (0, 0), 2)
+            g = np.clip(g.astype(np.float32) + (stars * space)[..., None], 0, 255).astype(np.uint8)
+        if fi < 45:
+            out = g
+        else:
+            tf = load(os.path.join(tdir, f"{fi:04d}.png"))
+            if fi <= 60:
+                u = (fi - 45) / 15
+                w_ = u * u * (3 - 2 * u)
+                A = zoom_blur(g, 1 + 0.9 * u * u, 0.2 * u)
+                B = zoom_blur(tf, 1.0, 0.16 * (1 - u))
+                out = cv2.addWeighted(A, 1 - w_, B, w_, 0)
+                out = flash(out, 0.3 * math.sin(math.pi * u))
+            else:
+                out = tf
+        enc.stdin.write(np.ascontiguousarray(out).tobytes())
     enc.stdin.close()
     enc.wait()
 
@@ -903,7 +1108,9 @@ def render_audio(path):
         else:
             gain = 0.24 if tr.get("amp", 0.5) >= 0.4 else 0.16
             place(whoosh(0.6, 0.85, 250, 4200, (0, 0), seed=i), cut, gain)
-    for at, g in ((4.0, 0.42), (16.0, 0.3), (26.0, 0.4)):
+    place(whoosh(0.9, 0.8, 200, 3800, (0, 0), seed=91), 1.85, 0.3)            # dive into the terrain
+    place(whoosh(0.5, 0.8, 300, 5000, (0.6, -0.6), seed=92), CHROME_AT + 0.5, 0.26)  # chrome word flies in
+    for at, g in ((DROP, 0.42), (18.0, 0.3), (28.0, 0.4)):
         place(boom(), at, g)
     out = mix + sfx
     out = np.tanh(out / max(np.abs(out).max(), 1e-6) * 1.15) / np.tanh(1.15) * 0.93
@@ -916,6 +1123,8 @@ if __name__ == "__main__":
     aud = os.path.join(OUT, "audio.wav")
     if only in ("", "audio"):
         render_audio(aud)
+    if only in ("", "video", "map") and (only == "map" or not os.path.exists(os.path.join(OUT, "map.mp4"))):
+        compose_map(os.path.join(OUT, "map.mp4"))
     if only in ("", "video"):
         render_video(vid)
     if only == "":
