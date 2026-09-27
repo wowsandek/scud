@@ -95,7 +95,7 @@ TRANSITIONS = {
 TITLES = [
     dict(text="Гарни", start=4.05, end=5.5, size=250, depth=True),
     dict(text="Севан", start=8.05, end=9.5, size=250, depth=True),
-    dict(text="Севанаванк", start=16.05, end=18.0, size=190, depth=True),
+    dict(text="Севанаванк", start=16.05, end=18.0, size=190, depth=True, vis=0.95),
     dict(text="Армения", start=24.6, end=27.5, size=235, depth=True, punch=26.0),
 ]
 
@@ -388,10 +388,15 @@ def draw_type_on(layer, word, x, y, t, t0, alpha=1.0, per=0.016, dur=0.35, ancho
 class Title:
     def __init__(self, spec):
         self.spec = spec
-        size = spec["size"]
-        self.word = Word(spec["text"], serif(size), WHITE, shadow=0.38, tracking=size * 0.01,
-                         shadow_blur=int(size * 0.09))
         self.pos = None  # (cx, cy), decided by place_titles()
+        self._build(spec["size"])
+
+    def _build(self, size):
+        self.word = Word(self.spec["text"], serif(size), WHITE, shadow=0.38, tracking=size * 0.01,
+                         shadow_blur=int(size * 0.09))
+
+    def resize(self, k):
+        self._build(int(self.word.fnt.size * k))
 
     def alive(self, t):
         return self.spec["start"] <= t < self.spec["end"]
@@ -413,7 +418,9 @@ class Title:
         a = lay.A[y0:y1, x0:x1].copy()
         a = np.where(a > 0.6, a, 0)
         lay.composite(np.zeros((H, W, 3), np.uint8))
-        return a, x0 - W / 2, y0 - H / 2
+        ys, xs = np.nonzero(a)
+        a = a[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+        return a, x0 + xs.min() - W / 2, y0 + ys.min() - H / 2
 
 
 class Chapter:
@@ -716,9 +723,6 @@ def place_titles(titles, seg):
     f = 6
     for tt in titles:
         s = tt.spec
-        fa, ox, oy = tt.alpha_footprint()
-        fa_s = cv2.resize(fa, (max(1, fa.shape[1] // f), max(1, fa.shape[0] // f)), interpolation=cv2.INTER_AREA)
-        hs, ws = fa_s.shape
         masks = []
         t = s["start"] + 0.05
         while t < s["end"] - 0.02:
@@ -726,33 +730,42 @@ def place_titles(titles, seg):
             masks.append(seg.mask(frame, key))
             t += 3 / FPS
         M = cv2.resize(np.mean(masks, 0), (W // f, H // f), interpolation=cv2.INTER_AREA)
-        top = fa_s.copy()
-        top[hs // 2:] = 0
-        tot, ttot = fa_s.sum(), top.sum()
         best = None
-        for cy in range(280 // f, 1150 // f):
-            y0 = cy + int(round(oy / f))
-            if y0 < 230 // f or y0 + hs > H // f:
-                continue
-            for cx in range(W // f // 2 - 24, W // f // 2 + 25, 2):
-                x0 = cx + int(round(ox / f))
-                if x0 < 24 // f or x0 + ws > (W - 24) // f:
+        for attempt in range(6):
+            fa, ox, oy = tt.alpha_footprint()
+            fa_s = cv2.resize(fa, (max(1, fa.shape[1] // f), max(1, fa.shape[0] // f)),
+                              interpolation=cv2.INTER_AREA)
+            hs, ws = fa_s.shape
+            top = fa_s.copy()
+            top[int(hs * 0.55):] = 0
+            tot, ttot = fa_s.sum(), top.sum()
+            for cy in range(260 // f, 1150 // f):
+                y0 = cy + int(round(oy / f))
+                if y0 < 240 // f or y0 + hs > 1250 // f:
                     continue
-                win = M[y0:y0 + hs, x0:x0 + ws]
-                vis = (fa_s * win).sum() / tot
-                vt = (top * win).sum() / ttot
-                if vt < 0.93:
-                    continue
-                if vis > 0.97:  # nothing in front: open sky, a little above the middle
-                    score = -0.4 - abs(cy * f - 600) / 3000 - abs(cx * f - W / 2) / 3000
-                else:
-                    score = -abs(vis - 0.8) - abs(cx * f - W / 2) / 4000
-                if best is None or score > best[0]:
-                    best = (score, cx * f, cy * f, vis, vt)
+                for cx in range(0, W // f):
+                    x0 = cx + int(round(ox / f))
+                    if x0 < 50 // f or x0 + ws > (W - 50) // f:
+                        continue
+                    win = M[y0:y0 + hs, x0:x0 + ws]
+                    vis = (fa_s * win).sum() / tot
+                    vt = (top * win).sum() / ttot
+                    if vt < 0.95:
+                        continue
+                    if vis > 0.97:  # nothing in front: open sky, a little above the middle
+                        score = -0.4 - abs(cy * f - 620) / 3000 - abs(cx * f - W / 2) / 2000
+                    else:
+                        score = -abs(vis - s.get("vis", 0.8)) - abs(cx * f - W / 2) / 3000
+                    if best is None or score > best[0]:
+                        best = (score, cx * f, cy * f, vis, vt, tt.word.fnt.size)
+            if best is not None:
+                break
+            tt.resize(0.88)  # does not fit anywhere: shrink and retry
         if best is None:
-            best = (0, W // 2, 600, -1, -1)
+            best = (0, W // 2, 620, -1, -1, tt.word.fnt.size)
         tt.pos = (best[1], best[2])
-        print(f"title {s['text']}: pos={tt.pos} visible={best[3]:.2f} top={best[4]:.2f}", flush=True)
+        print(f"title {s['text']}: size={best[5]} pos={tt.pos} visible={best[3]:.2f} top={best[4]:.2f}",
+              flush=True)
     src.close()
 
 
