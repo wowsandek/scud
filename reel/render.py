@@ -486,7 +486,9 @@ class EndCard:
     def __init__(self):
         self.stops = [("ГАРНИ", 190), ("СЕВАН", 540), ("СЕВАНАВАНК", 890)]
         self.names = [Word(n, sans(24, 600), WHITE, 0.5, tracking=4, shadow_blur=6) for n, _ in self.stops]
-        self.cta = Word("СОХРАНИ, ЧТОБЫ НЕ ПОТЕРЯТЬ", sans(28, 500), WHITE, 0.5, tracking=7, shadow_blur=6)
+        # Stories have no "save" button for viewers, so the reel CTA is off by default
+        cta = os.environ.get("CTA", "")
+        self.cta = Word(cta, sans(28, 500), WHITE, 0.5, tracking=7, shadow_blur=6) if cta else None
 
     def draw(self, layer, t):
         if t < 24.9:
@@ -503,7 +505,7 @@ class EndCard:
             if p > 0:
                 layer.dot(x, y, 7 * p + 3 * math.exp(-max(0, t - t_reach) / 0.12))
                 draw_type_on(layer, self.names[i], x, y + 52, t, t_reach, 1.0, per=0.012, anchor="center")
-        if t > 26.1:
+        if self.cta and t > 26.1:
             draw_type_on(layer, self.cta, W / 2, 1370, t, 26.1, 0.95, per=0.02, anchor="center")
             half = self.cta.width() / 2 * expo_out((t - 26.1) / 0.8)
             layer.line(W / 2 - half, 1392, W / 2 + half, 1392, 0.6, 2)
