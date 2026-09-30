@@ -50,14 +50,14 @@ export default class Open extends Scene {
     c.font = font(F.mono(500), 21);
     c.letterSpacing = '6px';
     c.fillStyle = rgba('ink', 0.7);
-    typeOn(c, 'ТРАКТАТ № 1 · 27.IX.2026', 150, 250, lt, 0.05, 0.35);
+    typeOn(c, 'ТРАКТАТ № 1 · 27.IX.2026', 150, 250, lt, -0.2, 0.35);
     c.letterSpacing = '0px';
-    // the title, rising from a clip, line by line on the beat
+    // the title, rising from a clip, line by line on the beat (the first frame is the cover: already up)
     c.font = font(F.serif(600, true), 138);
     c.fillStyle = rgba('ink', 0.97);
     const lines = ['Один день', 'в Армении'];
     lines.forEach((s, i) => {
-      const k = ease.outExpo(prog(lt, 0.0 + i * 0.5, 0.6 + i * 0.5));
+      const k = ease.outExpo(prog(lt, -0.3 + i * 0.5, 0.3 + i * 0.5));
       const y = 395 + i * 132;
       c.save();
       c.beginPath(); c.rect(100, y - 130, W, 162); c.clip();
@@ -116,7 +116,7 @@ export default class Open extends Scene {
     lb.render(renderer, out);
     return {
       paper: 1, frame: 1 - ease.inExpo(exit), bloom: 0.45, vignette: 0.12, grain: 0.05,
-      flash: 0.3 * pulse(lt, 0, 0.15), zoom: 1 + 0.01 * pulse(lt, 0.5, 0.15),
+      flash: 0.2 * pulse(lt, 0.5, 0.12), zoom: 1 + 0.01 * pulse(lt, 0.5, 0.15),
     };
   }
 }
