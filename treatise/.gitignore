@@ -1,0 +1,7 @@
+# generated (see analysis/): the pre-cut footage (~0.7 GB), the terrain raster, the music cut
+app/node_modules/
+app/public/footage/*.bin
+app/public/map/terrain.bin
+audio/
+out/
+__pycache__/
