@@ -118,6 +118,94 @@ export class Engraver {
   }
 }
 
+// ------------------------------------------------------------------ natural footage
+export interface PhotoParams {
+  zoom?: number; rot?: number; panX?: number; panY?: number;
+  win?: [number, number, number, number];
+  /** 0..1 how far the photograph has developed from the top (of the window) down; below it the pass leaves
+   *  what is already in the target (the engraving of the same frame). 1 (default) = all of it. */
+  develop?: number;
+  fade?: number; contrast?: number; saturation?: number; exposure?: number;
+}
+
+/** The footage in natural colour (sRGB JPEG frames, decoded to linear), with the Engraver's framing. */
+export class Photo {
+  pass = new FSPass(/* glsl */ `
+    uniform sampler2D tex;
+    uniform vec4 xf, win;
+    uniform float develop, fade, contrast, satur, expo;
+    void main() {
+      vec2 frag = FRAG_PX;
+      vec2 uv = frag / vec2(${W.toFixed(1)}, ${H.toFixed(1)});
+      float asp = ${(W / H).toFixed(5)};
+      if (win.z > 0.0) {
+        vec2 ft = vec2(frag.x, ${H.toFixed(1)} - frag.y) - win.xy;
+        if (ft.x < 0.0 || ft.y < 0.0 || ft.x > win.z || ft.y > win.w) discard;
+        uv = vec2(ft.x / win.z, 1.0 - ft.y / win.w);
+        asp = win.z / win.w;
+      }
+      if (1.0 - uv.y > develop) discard;
+      vec2 c = uv - 0.5;
+      c.x *= asp;
+      c = rot2(xf.y) * c;
+      c.x /= asp;
+      c *= vec2(min(1.0, asp / ${(W / H).toFixed(5)}), min(1.0, ${(W / H).toFixed(5)} / asp));
+      vec2 suv = c / xf.x + 0.5 + xf.zw;
+      suv.y = 1.0 - suv.y;
+      vec3 col = texture(tex, clamp(suv, vec2(0.001), vec2(0.999))).rgb * expo;
+      // a gentle grade: contrast about mid-grey (in a perceptual space), saturation
+      vec3 p = pow(max(col, 0.0), vec3(1.0 / 2.2));
+      p = (p - 0.5) * contrast + 0.5;
+      p = mix(vec3(dot(p, vec3(0.2126, 0.7152, 0.0722))), p, satur);
+      col = pow(max(p, 0.0), vec3(2.2));
+      col = mix(col, C_INK, fade);
+      fragColor = vec4(col, 1.0);
+    }`, {
+    tex: { value: null }, xf: { value: new THREE.Vector4(1, 0, 0, 0) }, win: { value: new THREE.Vector4(0, 0, 0, 0) },
+    develop: { value: 1 }, fade: { value: 0 }, contrast: { value: 1.04 }, satur: { value: 1.06 }, expo: { value: 1 },
+  });
+
+  render(renderer: THREE.WebGLRenderer, out: THREE.WebGLRenderTarget, tex: THREE.Texture, p: PhotoParams = {}) {
+    const u = this.pass.u;
+    u.tex!.value = tex;
+    (u.xf!.value as THREE.Vector4).set(p.zoom ?? 1, p.rot ?? 0, p.panX ?? 0, p.panY ?? 0);
+    (u.win!.value as THREE.Vector4).set(...(p.win ?? [0, 0, 0, 0]));
+    u.develop!.value = p.develop ?? 1.01;
+    u.fade!.value = p.fade ?? 0;
+    u.contrast!.value = p.contrast ?? 1.04;
+    u.satur!.value = p.saturation ?? 1.06;
+    u.expo!.value = p.exposure ?? 1;
+    this.pass.render(renderer, out);
+  }
+}
+
+/** Ink gradients that keep the type legible over natural footage: top band and bottom band (px). */
+export function scrims(c: CanvasRenderingContext2D, o: { top?: [number, number, number]; bottom?: [number, number, number] } = {}) {
+  c.save();
+  c.shadowBlur = 0;
+  if (o.bottom) {
+    const [y0, y1, a] = o.bottom;
+    const g = c.createLinearGradient(0, y0, 0, y1);
+    g.addColorStop(0, rgba('ink', 0));
+    g.addColorStop(0.55, rgba('ink', a * 0.72));
+    g.addColorStop(1, rgba('ink', a));
+    c.fillStyle = g;
+    c.fillRect(0, y0, W, y1 - y0);
+    c.fillStyle = rgba('ink', a);
+    c.fillRect(0, y1, W, H - y1);
+  }
+  if (o.top) {
+    const [y0, y1, a] = o.top;
+    const g = c.createLinearGradient(0, y0, 0, y1);
+    g.addColorStop(0, rgba('ink', a));
+    g.addColorStop(0.55, rgba('ink', a * 0.8));
+    g.addColorStop(1, rgba('ink', 0));
+    c.fillStyle = g;
+    c.fillRect(0, y0, W, y1 - y0);
+  }
+  c.restore();
+}
+
 // ------------------------------------------------------------------ terrain map
 export interface MapMeta { n: number; bbox: [number, number, number, number]; km: [number, number]; places: Record<string, [number, number]> }
 
@@ -266,7 +354,7 @@ export function drawReadout(c: CanvasRenderingContext2D, x: number, y: number, v
 
 // ------------------------------------------------------------------ treatise type
 let HALO: string | null = null;
-/** Knock the ground colour out around typed text (cartographic halo) over busy plates; null = off. */
+/** Set typed labels on a chip of this colour (legible over bright footage); null = off. */
 export function setHalo(color: string | null) { HALO = color; }
 
 /** Type one line on: characters appear in order over `dur` seconds from t0 (no easing: a typewriter). */
@@ -274,12 +362,14 @@ export function typeOn(c: CanvasRenderingContext2D, s: string, x: number, y: num
   const n = Math.floor(clamp((t - t0) / Math.max(dur, 1e-3)) * s.length + 1e-6);
   if (n <= 0) return 0;
   if (HALO) {
+    // the chip spans the whole line from the first character, so it doesn't jitter as the text types on
+    const m = c.measureText(s), mn = c.measureText(s.slice(0, n));
+    const al = c.textAlign, left = al === 'right' || al === 'end' ? x - m.width : al === 'center' ? x - m.width / 2 : x;
+    const w = al === 'right' || al === 'end' || al === 'center' ? m.width : mn.width;
     c.save();
     c.shadowBlur = 0;
-    c.strokeStyle = HALO;
-    c.lineWidth = 3.5;
-    c.lineJoin = 'round';
-    c.strokeText(s.slice(0, n), x, y);
+    c.fillStyle = HALO;
+    c.fillRect(left - 7, y - mn.fontBoundingBoxAscent - 3, w + 14, mn.fontBoundingBoxAscent + mn.fontBoundingBoxDescent + 6);
     c.restore();
   }
   c.fillText(s.slice(0, n), x, y);
@@ -314,7 +404,7 @@ export function drawCaption(c: CanvasRenderingContext2D, t: number, t0: number, 
   c.fillText(o.title, x, y + (1 - tp) * size * 0.9);
   c.restore();
   c.font = font(F.mono(400), 22);
-  c.fillStyle = rgba(fg, 0.66);
+  c.fillStyle = rgba(fg, 0.78);
   o.notes.forEach((s, i) => typeOn(c, s, x, y + 46 + i * 32, t, t0 + 0.35 + i * 0.22, 0.45));
   c.restore();
 }

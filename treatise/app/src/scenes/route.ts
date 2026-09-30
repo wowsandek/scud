@@ -8,10 +8,10 @@ import { Layer2D, W, H } from '../engine/gl';
 import { LineBatch } from '../engine/lines';
 import { LIN, rgba } from '../engine/palette';
 import { F, font } from '../engine/type';
-import { loadShot, type Shot } from '../engine/footage';
+import { loadPhoto, type PhotoShot } from '../engine/footage';
 import { clamp, ease, lerp, prog, pulse, polylineLengths, pointAtLength, type V2 } from '../engine/util';
 import { sparkHead, sparkParticles } from './_motifs';
-import { Engraver, TerrainMap, loadMap, mapToScreen, type MapCam, type MapMeta, PVal, drawCaption, drawReadout, typeOn, setHalo } from './_plate';
+import { Photo, TerrainMap, loadMap, mapToScreen, type MapCam, type MapMeta, PVal, drawCaption, drawReadout, typeOn, setHalo } from './_plate';
 
 // the road, as (lat, lon) waypoints
 const LL: Record<number, [number, number][]> = {
@@ -69,8 +69,8 @@ export default class Route extends Scene {
   L!: Leg;
   map!: { meta: MapMeta; tex: THREE.DataTexture };
   terrain = new TerrainMap();
-  eng = new Engraver();
-  shot: Shot | null = null;
+  photo = new Photo();
+  shot: PhotoShot | null = null;
   layer = new Layer2D();
   lines = new LineBatch(6000, { screen2D: true, blend: 'add' });
   pv = new PVal();
@@ -84,7 +84,12 @@ export default class Route extends Scene {
       const pts = LL[k]!.map((p) => toMap(this.map.meta, p));
       this.paths[k] = { pts, len: polylineLengths(pts) };
     }
-    if (this.L.inset) this.shot = await loadShot(this.L.inset.shot);
+    if (this.L.inset) this.shot = await loadPhoto(this.L.inset.shot);
+  }
+
+  override async prepare(lts: number[]) {
+    const ins = this.L.inset;
+    if (ins && this.shot) await this.shot.prepare(lts.map((lt) => Math.max(0, lt - ins.t[0])));
   }
 
   /** Map position of the spark on this leg at local time lt, and the leg's 0..1 progress. */
@@ -104,14 +109,14 @@ export default class Route extends Scene {
     const dive = this.leg === 3 ? prog(lt, 3.35, 4.0) : 0;
     this.terrain.render(renderer, out, tex, cam, { lit: 1, mask: [-1, -0.9, 0.68, 0.78] });
 
-    // the inset: footage of the road, engraved into its own window
+    // the inset: footage of the road in its own window, cut in from the top
     const ins = L.inset;
     let insetK = 0;
     if (ins && this.shot) {
       insetK = clamp((lt - ins.t[0]) / 0.35) * (1 - clamp((lt - ins.t[1]) / 0.2));
       if (insetK > 0) {
-        this.eng.render(renderer, out, this.shot.at(lt - ins.t[0]), {
-          win: ins.win, zoom: 1.05, gain: 1.15, freq: 0.24, angle: 0.5, reveal: ease.outCubic(clamp((lt - ins.t[0]) / 0.4)), fade: 1 - clamp(insetK * 1.5),
+        this.photo.render(renderer, out, this.shot.at(Math.max(0, lt - ins.t[0])), {
+          win: ins.win, zoom: 1.05, develop: ease.outCubic(clamp((lt - ins.t[0]) / 0.4)) * 1.01, fade: 1 - clamp(insetK * 1.5),
         });
       }
     }

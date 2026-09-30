@@ -70,6 +70,12 @@ export abstract class Scene {
   /** Load/create resources. Called once before first render. */
   init(): Promise<void> | void {}
 
+  /**
+   * Load what rendering at these local times needs (e.g. streamed footage frames). Awaited by the export
+   * before each frame (render() itself is synchronous); the preview player does not wait for it.
+   */
+  prepare(_lts: number[]): Promise<void> | void {}
+
   /** Reset internal state (called on seeks for stateful scenes). */
   reset(): void {}
 

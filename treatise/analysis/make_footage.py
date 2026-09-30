@@ -6,6 +6,9 @@ speed ramps baked in) as a two-channel 8-bit raster:
   R = luminance with local contrast (CLAHE) — what the engraving shader hatches,
   G = "signal" mask: saturated orange/red surfaces and small blown highlights (glitter on the water;
       large blown areas such as the sky around the sun are left out) — drawn in the palette's orange.
+The natural-colour frames the plates show are written alongside, full size, as JPEGs:
+app/public/footage/rgb/<id>/NNNN.jpg (loaded per frame by the engine, see engine/footage.ts).
+
 Each shot becomes app/public/footage/<id>.bin (frames * H * W * 2 bytes, row 0 = top) plus an entry
 in app/public/footage/index.json, with per frame the signal's centroid (0..1, y down) and area
 fraction ("sig"), which the plates use to put callouts on it.
@@ -84,7 +87,7 @@ for sid, (clip, src_in, ramp) in SHOTS.items():
     ts = src_times(src_in, ramp)
     want = [int(round(t * fps)) for t in ts]
     cap.set(cv2.CAP_PROP_POS_FRAMES, want[0])
-    pos, frame, frames = want[0] - 1, None, []
+    pos, frame, frames, full = want[0] - 1, None, [], []
     for w_ in want:
         while pos < w_:
             ok, f = cap.read()
@@ -92,7 +95,12 @@ for sid, (clip, src_in, ramp) in SHOTS.items():
                 break
             frame, pos = f, pos + 1
         frames.append(encode(frame))
+        full.append(frame)
     cap.release()
+    rgb_dir = os.path.join(OUT, "rgb", sid)
+    os.makedirs(rgb_dir, exist_ok=True)
+    for i, f in enumerate(full):
+        cv2.imwrite(os.path.join(rgb_dir, "%04d.jpg" % i), f, [cv2.IMWRITE_JPEG_QUALITY, 92])
     arr = np.stack(frames).astype(np.uint8)
     arr.tofile(os.path.join(OUT, sid + ".bin"))
     sig = []

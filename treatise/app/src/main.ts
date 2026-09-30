@@ -42,7 +42,10 @@ function setupExport() {
     height: PH,
     timeline: TIMELINE.map(({ id, start, end }) => ({ id, start, end })),
     /** Render a single frame at t (seeks as needed). */
-    still(t: number, samples: number | AdaptiveSampling = 1, shutter = 0.5) { return engine.render(t, 1 / 60, true, samples, shutter); },
+    async still(t: number, samples: number | AdaptiveSampling = 1, shutter = 0.5) {
+      await engine.prepare(t, 1 / 60, samples, shutter);
+      return engine.render(t, 1 / 60, true, samples, shutter);
+    },
     /** The last rendered frame as a full-resolution (PW x PH) PNG, base64 (for stills at scale > 1). */
     async png() {
       const px = await engine.readPixelsAsync(), row = PW * 4;
@@ -74,9 +77,13 @@ function setupExport() {
       // warm-up: render one frame before the range so the first frame is sequential for stateful scenes
       const S = opts.samples ?? 1, SH = opts.shutter ?? 0.5;
       // (adaptive sampling only runs stateless scenes: one sample is enough for the warm-up)
-      if (n0 > 0) engine.render((n0 - 1) * dt, dt, false, typeof S === 'number' ? S : 1, SH);
+      if (n0 > 0) {
+        await engine.prepare((n0 - 1) * dt, dt, typeof S === 'number' ? S : 1, SH);
+        engine.render((n0 - 1) * dt, dt, false, typeof S === 'number' ? S : 1, SH);
+      }
       const used: Record<number, number> = {}; // sub-frames per frame -> frames
       for (let n = n0; n < n1; n++) {
+        await engine.prepare(n * dt, dt, S, SH);
         const k = engine.render(n * dt, dt, false, S, SH);
         used[k] = (used[k] ?? 0) + 1;
         await engine.readPixelsAsync(buf);

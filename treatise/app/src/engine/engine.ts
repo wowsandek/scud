@@ -188,6 +188,25 @@ export class Engine {
   }
 
   /**
+   * Let the scenes active over the frame at t load what its sub-frames need (see Scene.prepare), so that
+   * render(t, dt, …, samples, shutter) finds it in memory. The sub-frame times are render()'s; for adaptive
+   * sampling, the two ends of the shutter.
+   */
+  async prepare(t: number, dt = 1 / 60, samples: number | AdaptiveSampling = 1, shutter = 0.5) {
+    const n = typeof samples === 'number' ? samples : 0;
+    const ts = n === 1 ? [t]
+      : n > 1 ? Array.from({ length: n }, (_, k) => Math.max(0, t + dt * shutter * ((k + 0.5) / n - 0.5)))
+      : [Math.max(0, t - (dt * shutter) / 2), t, t + (dt * shutter) / 2];
+    const jobs: (Promise<void> | void)[] = [];
+    for (const e of this.timeline) {
+      const sc = this.loaded.get(e.id)?.scene;
+      const lts = ts.filter((x) => x >= e.start && x < e.end).map((x) => x - e.start);
+      if (sc && lts.length) jobs.push(sc.prepare(lts));
+    }
+    await Promise.all(jobs);
+  }
+
+  /**
    * Render song time t. `dt` is the nominal frame step (1/fps). A non-sequential t counts as a
    * seek: stateful scenes are reset and fast-forwarded.
    *

@@ -1,5 +1,6 @@
-// The title page: bone paper inside the crop-mark frame, the treatise's name in Cormorant italic, an
-// engraved frontispiece (Sevanavank, the day's destination), the instrument at its prior, a footnote.
+// The title page: bone paper inside the crop-mark frame, the treatise's name in Cormorant italic, a
+// frontispiece (Sevanavank, the day's destination: cut as an engraving, then developed into the
+// photograph), the instrument at its prior, a footnote.
 // The spark underlines the title, rests, then dives off the bottom of the page into the map (Табл. I).
 import * as THREE from 'three';
 import { Scene, type Frame, type PostOverrides } from '../engine/scene';
@@ -7,20 +8,30 @@ import { Layer2D, W, clearRT } from '../engine/gl';
 import { LineBatch } from '../engine/lines';
 import { LIN, rgba } from '../engine/palette';
 import { F, font } from '../engine/type';
-import { loadShot, type Shot } from '../engine/footage';
+import { loadShot, loadPhoto, type Shot, type PhotoShot } from '../engine/footage';
 import { clamp, ease, lerp, prog, pulse } from '../engine/util';
 import { sparkHead, sparkParticles } from './_motifs';
-import { Engraver, drawReadout, typeOn } from './_plate';
+import { Engraver, Photo, drawReadout, typeOn } from './_plate';
 
 const WIN: [number, number, number, number] = [150, 700, 780, 600];
 
 export default class Open extends Scene {
   eng = new Engraver();
+  photo = new Photo();
   shot!: Shot;
+  ph!: PhotoShot;
   L = new Layer2D();
   lines = new LineBatch(3000, { screen2D: true, blend: 'add' });
 
-  override async init() { this.shot = await loadShot('vank_zoom'); }
+  override async init() {
+    this.shot = await loadShot('vank_zoom');
+    this.ph = await loadPhoto('vank_zoom');
+  }
+
+  /** The frontispiece plays at half speed and holds its last frame. */
+  fl(lt: number) { return Math.min(lt * 0.5, 0.95); }
+
+  override async prepare(lts: number[]) { await this.ph.prepare(lts.map((lt) => this.fl(lt))); }
 
   /** The spark: draws the underline (0.9–1.7), rests at its end, dives off the page (3.2–4.0). */
   head(lt: number) {
@@ -35,12 +46,17 @@ export default class Open extends Scene {
     const { renderer, comp } = this.ctx;
     const lt = f.lt, t = f.t;
     const exit = prog(lt, 3.45, 4.0);
-    // the frontispiece: engraved in ink, cut from the top down by the burin
+    // the frontispiece: engraved in ink, cut from the top down by the burin; then the photograph develops
     clearRT(renderer, out, LIN.bone);
-    this.eng.render(renderer, out, this.shot.at(Math.min(lt * 0.5, 0.95)), {
-      paper: 1, win: WIN, zoom: 1.02 + 0.03 * lt / 4, panY: -0.04, gain: 1.08, lift: 0.03, freq: 0.21, angle: 0.3,
-      reveal: ease.outCubic(prog(lt, 0.6, 1.9)), revealSoft: 0.12,
-    });
+    const zoom = 1.02 + 0.03 * lt / 4, panY = 0.05;
+    const develop = ease.inOutQuad(prog(lt, 1.5, 2.2));
+    if (develop < 1) {
+      this.eng.render(renderer, out, this.shot.at(this.fl(lt)), {
+        paper: 1, win: WIN, zoom, panY, gain: 1.08, lift: 0.03, freq: 0.21, angle: 0.3,
+        reveal: ease.outCubic(prog(lt, 0.5, 1.4)), revealSoft: 0.12,
+      });
+    }
+    if (develop > 0) this.photo.render(renderer, out, this.ph.at(this.fl(lt)), { win: WIN, zoom, panY, develop: develop > 0.999 ? 1.01 : develop });
 
     const c = this.L.ctx;
     this.L.clear();

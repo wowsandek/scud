@@ -1,24 +1,26 @@
-// The conclusion (Табл. X): the last walk along the peninsula, engraved; the instrument reaches 1.00
+// The conclusion (Табл. X): the last walk along the peninsula; the instrument reaches 1.00
 // and then breaks its own cap; the result is set as a numbered equation; the crop-mark frame closes
-// in and the engraving is taken back to ink while the music fades.
+// in and the picture is taken back to ink while the music fades.
 import * as THREE from 'three';
 import { Scene, type Frame, type PostOverrides } from '../engine/scene';
 import { Layer2D, W } from '../engine/gl';
 import { LineBatch } from '../engine/lines';
 import { LIN, rgba } from '../engine/palette';
 import { F, font } from '../engine/type';
-import { loadShot, type Shot } from '../engine/footage';
+import { loadPhoto, type PhotoShot } from '../engine/footage';
 import { clamp, ease, lerp, prog, pulse } from '../engine/util';
 import { sparkHead, sparkParticles } from './_motifs';
-import { Engraver, drawCaption, drawReadout, typeOn } from './_plate';
+import { Photo, drawCaption, drawReadout, typeOn, scrims } from './_plate';
 
 export default class Outro extends Scene {
-  eng = new Engraver();
-  shot!: Shot;
+  photo = new Photo();
+  shot!: PhotoShot;
   L = new Layer2D();
   lines = new LineBatch(3000, { screen2D: true, blend: 'add' });
 
-  override async init() { this.shot = await loadShot('pen_walk'); }
+  override async init() { this.shot = await loadPhoto('pen_walk'); }
+
+  override async prepare(lts: number[]) { await this.shot.prepare(lts); }
 
   /** The value: 1.00 from the start, over the cap from 1.5 s. */
   value(lt: number) { return 1 + 0.03 * ease.outExpo(prog(lt, 1.5, 2.3)) + 0.004 * Math.sin(lt * 7) * prog(lt, 2.3, 2.6); }
@@ -33,13 +35,13 @@ export default class Outro extends Scene {
     const { renderer, comp } = this.ctx;
     const lt = f.lt, t = f.t;
     const toInk = ease.inOutCubic(prog(lt, 3.9, 5.3));
-    // the last walk, as a plate in the middle of the page (text above and below it)
-    this.eng.render(renderer, out, this.shot.at(lt), {
-      zoom: 1.02 + 0.03 * lt / 6, gain: 1.05, lift: 0.05, gamma: 1.35, angle: 0.2, mask: [0.3, 0.37, 0.64, 0.73],
-      reveal: ease.outCubic(clamp(lt / 0.5)), fade: toInk,
-    });
+    // the last walk, full frame; the type sits on ink bands above and below it
+    this.photo.render(renderer, out, this.shot.at(lt), { zoom: 1.02 + 0.03 * lt / 6, fade: toInk });
     const c = this.L.ctx;
     this.L.clear();
+    scrims(c, { top: [0, 820, 0.88], bottom: [1000, 1400, 0.92] });
+    c.shadowColor = rgba('ink', 0.9);
+    c.shadowBlur = 10;
     const v = this.value(lt);
     c.save();
     drawCaption(c, lt, 0.2, { table: 'ТАБЛ. X', title: 'Заключение', notes: ['выборка: 1 день · 5 мест', 'погрешность: пренебрежимо мала'], alpha: 1 - prog(lt, 2.8, 3.2) });
@@ -83,7 +85,7 @@ export default class Outro extends Scene {
     lb.render(renderer, out);
     void LIN;
     return {
-      paper: 0, bloom: 0.55, vignette: 0.4,
+      paper: 0, bloom: 0.22, halation: 0.12, grain: 0.045, vignette: 0.35,
       frame: ease.outExpo(prog(lt, 3.9, 4.8)),
       flash: 0.3 * pulse(lt, 0, 0.12) + 0.25 * pulse(lt, 1.5, 0.12) + 0.2 * pulse(lt, 3.0, 0.1),
       fade: ease.inQuad(prog(lt, 5.1, 6.0)),

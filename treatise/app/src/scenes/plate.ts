@@ -1,6 +1,7 @@
-// A footage plate of the treatise: the day's clips engraved (see _plate.ts Engraver), cut on the beat
-// inside the plate, with a diagram in the plate's own idiom drawn over them by the spark, a caption
-// block (table number, Cormorant title, deadpan footnotes) and the P(восторг) instrument.
+// A footage plate of the treatise: the day's clips in natural colour, cut on the beat inside the plate
+// (the first one is cut as an engraving and develops into the photograph as the burin passes), with a
+// diagram in the plate's own idiom drawn over them by the spark, a caption block (table number,
+// Cormorant title, deadpan footnotes) and the P(восторг) instrument.
 // One module serves every place; `params.id` picks the shots and the diagram.
 import * as THREE from 'three';
 import { Scene, type Frame, type PostOverrides } from '../engine/scene';
@@ -8,10 +9,10 @@ import { Layer2D, W, H } from '../engine/gl';
 import { LineBatch } from '../engine/lines';
 import { LIN, rgba } from '../engine/palette';
 import { F, font } from '../engine/type';
-import { loadShot, type Shot } from '../engine/footage';
+import { loadShot, loadPhoto, type Shot, type PhotoShot } from '../engine/footage';
 import { clamp, ease, lerp, prog, pulse, TAU, hash } from '../engine/util';
 import { sparkHead, sparkParticles } from './_motifs';
-import { Engraver, PVal, PLATE_MASK, drawCaption, drawReadout, callout, typeOn, setHalo } from './_plate';
+import { Engraver, Photo, PVal, drawCaption, drawReadout, callout, typeOn, setHalo, scrims } from './_plate';
 import { LAKE } from './_lake';
 
 interface Cut { shot: string; at: number; dur: number; zoom: [number, number]; pan?: [number, number, number, number]; rot?: number }
@@ -43,7 +44,7 @@ const PLATES: Record<string, PlateDef> = {
       { shot: 'geghard_yard', at: 2, dur: 1, zoom: [1.04, 1.08] },
       { shot: 'geghard_tunnel', at: 3, dur: 1, zoom: [1.0, 1.1] },
     ],
-    paper: 1, gain: 1.05, lift: 0.02, table: 'ТАБЛ. IV', title: 'Гегард',
+    gain: 1.05, lift: 0.02, table: 'ТАБЛ. IV', title: 'Гегард',
     notes: ['монастырь, частично высечен в скале', 'IV–XIII вв. · скала − скала = храм'],
   },
   sevan: {
@@ -66,7 +67,7 @@ const PLATES: Record<string, PlateDef> = {
       { shot: 'vank_zoom', at: 2, dur: 1, zoom: [1.02, 1.08] },
       { shot: 'vank_lake', at: 3, dur: 1, zoom: [1.0, 1.05] },
     ],
-    paper: 1, gain: 1.05, lift: 0.02, table: 'ТАБЛ. VIII', title: 'Севанаванк',
+    gain: 1.05, lift: 0.02, table: 'ТАБЛ. VIII', title: 'Севанаванк',
     notes: ['IX в. · крестово-купольный', 'полуостров, до XX в. — остров'],
   },
   peninsula: {
@@ -85,7 +86,9 @@ export default class Plate extends Scene {
   def!: PlateDef;
   pid = '';
   shots = new Map<string, Shot>();
+  photos = new Map<string, PhotoShot>();
   eng = new Engraver();
+  photo = new Photo();
   L = new Layer2D();
   lines = new LineBatch(8000, { screen2D: true, blend: 'add' });
   pv = new PVal();
@@ -93,7 +96,16 @@ export default class Plate extends Scene {
   override async init() {
     this.pid = String(this.ctx.params.id);
     this.def = PLATES[this.pid]!;
-    for (const c of this.def.cuts) if (!this.shots.has(c.shot)) this.shots.set(c.shot, await loadShot(c.shot));
+    for (const c of this.def.cuts) {
+      if (!this.shots.has(c.shot)) this.shots.set(c.shot, await loadShot(c.shot));
+      if (!this.photos.has(c.shot)) this.photos.set(c.shot, await loadPhoto(c.shot));
+    }
+  }
+
+  override async prepare(lts: number[]) {
+    const by = new Map<string, number[]>();
+    for (const lt of lts) { const c = this.cutAt(lt); by.set(c.shot, [...(by.get(c.shot) ?? []), lt - c.at]); }
+    await Promise.all([...by].map(([id, ls]) => this.photos.get(id)!.prepare(ls)));
   }
 
   cutAt(lt: number) {
@@ -105,18 +117,22 @@ export default class Plate extends Scene {
 
   override render(f: Frame, out: THREE.WebGLRenderTarget): PostOverrides {
     const { renderer, comp } = this.ctx;
-    const d = this.def, lt = f.lt, t = f.t, paper = d.paper ?? 0;
+    const d = this.def, lt = f.lt, t = f.t, paper = 0;
     const cut = this.cutAt(lt);
     const cl = lt - cut.at, cp = clamp(cl / cut.dur);
     const shot = this.shots.get(cut.shot)!;
     // each cut lands with a small punch-in that settles, then drifts on its own zoom
     const punch = 0.035 * Math.pow(0.5, cl / 0.12);
     const zoom = lerp(cut.zoom[0], cut.zoom[1], ease.inOutQuad(cp)) + punch;
-    this.eng.render(renderer, out, shot.at(cl), {
-      zoom, rot: cut.rot ?? 0, paper, angle: d.angle ?? 0.35, freq: d.freq, gain: d.gain ?? 1.05, lift: d.lift ?? 0.05,
-      gamma: d.gamma ?? (paper > 0.5 ? 1.25 : 1.35), mask: PLATE_MASK,
-      reveal: cut.at === 0 ? ease.outCubic(clamp(lt / 0.45)) : 1,
-    });
+    // the plate opens as an engraving cut from the top, and the photograph develops right behind the burin
+    const develop = cut.at === 0 ? ease.inOutQuad(prog(lt, 0.12, 0.6)) : 1;
+    if (develop < 1) {
+      this.eng.render(renderer, out, shot.at(cl), {
+        zoom, rot: cut.rot ?? 0, angle: d.angle ?? 0.35, freq: d.freq, gain: d.gain ?? 1.05, lift: d.lift ?? 0.05,
+        gamma: d.gamma ?? 1.35, reveal: ease.outCubic(clamp(lt / 0.3)),
+      });
+    }
+    this.photo.render(renderer, out, this.photos.get(cut.shot)!.at(cl), { zoom, rot: cut.rot ?? 0, develop: develop > 0.999 ? 1.01 : develop });
 
     // ---- overlay
     const c = this.L.ctx;
@@ -124,16 +140,21 @@ export default class Plate extends Scene {
     const lb = this.lines;
     lb.clear();
     const ink = paper > 0.5;
-    // a soft halo of the ground colour keeps hairlines and labels legible over the engraving
+    scrims(c, { top: [0, 400, 0.5], bottom: [1000, 1400, 0.92] });
+    // a soft halo of the ground colour keeps hairlines and labels legible over the footage
     c.shadowColor = rgba(ink ? 'bone' : 'ink', 0.95);
     c.shadowBlur = 9;
-    setHalo(rgba(ink ? 'bone' : 'ink', 0.85));
+    setHalo(rgba(ink ? 'bone' : 'ink', 0.7));
     const head = this.diagram(c, lb, f, cut, cl, shot, zoom);
     setHalo(null);
     // the bottom block (clear of the stories UI): caption on the left, the instrument on the right
     drawCaption(c, lt, 0.3, { table: d.table, title: d.title, notes: d.notes, ink, size: d.titleSize ?? 74 });
     drawReadout(c, 790, 1500, this.pv.value(t), { ink, flash: this.pv.flash(t), scale: 0.9 });
     comp.draw(renderer, this.L.upload(), out);
+    if (develop > 0 && develop < 1) {  // the developing edge
+      const y = develop * H;
+      lb.seg2(0, y, W, y, 1.6, [LIN.signal[0] * 2, LIN.signal[1] * 2, LIN.signal[2] * 2], 0.9);
+    }
     if (head) {
       sparkParticles(lb, t, () => head, { rate: 70, intensity: 0.8, life: 0.35, speed: 200 });
       sparkHead(lb, head.x, head.y, t, 0.8, 1);
@@ -141,14 +162,14 @@ export default class Plate extends Scene {
     lb.render(renderer, out);
     const cutHit = pulse(lt, cut.at, 0.08);
     return {
-      paper, bloom: 0.6, flash: cut.at > 0 ? 0.09 * cutHit : 0.3 * pulse(lt, 0, 0.1),
-      shake: [0, 0], zoom: 1 + 0.01 * pulse(lt, cut.at, 0.12), vignette: paper ? 0.15 : 0.35,
+      paper, bloom: 0.22, halation: 0.12, grain: 0.045, flash: cut.at > 0 ? 0.06 * cutHit : 0.25 * pulse(lt, 0, 0.1),
+      shake: [0, 0], zoom: 1 + 0.01 * pulse(lt, cut.at, 0.12), vignette: 0.3,
     };
   }
 
   /** The plate's own diagram. Returns the spark's head position (or null when it rests). */
   diagram(c: CanvasRenderingContext2D, lb: LineBatch, f: Frame, cut: Cut, cl: number, shot: Shot, zoom: number): P2 | null {
-    const lt = f.lt, t = f.t, ink = (this.def.paper ?? 0) > 0.5;
+    const lt = f.lt, t = f.t, ink = false;
     const fg = ink ? 'ink' : 'bone';
     const toScreen = (u: number, v: number) => ({ x: (u - 0.5) * zoom * W + W / 2, y: (v - 0.5) * zoom * H + H / 2 });
     c.save();

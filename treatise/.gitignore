@@ -5,3 +5,4 @@ app/public/map/terrain.bin
 audio/
 out/
 __pycache__/
+app/public/footage/rgb/
