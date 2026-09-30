@@ -1,8 +1,9 @@
 # Один день в Армении — иллюстрированный трактат
 
 A 46-second vertical (1080×1920) video of a day trip from Yerevan to Garni, Geghard and Lake Sevan. It is
-styled as an illustrated treatise: the footage is engraved into line plates, a contour map follows the
-route, and a deadpan "P(восторг)" instrument rises from place to place.
+styled as an illustrated treatise. Each plate opens as a line engraving that develops into the footage
+in natural colour, a contour map follows the route, and a deadpan "P(восторг)" instrument rises from
+place to place.
 
 The engine is a fork of [mexicat/pdoom-video](https://github.com/mexicat/pdoom-video) (MIT, see
 `LICENSE`; upstream notes in `docs/ENGINE.upstream.md`). It is TypeScript + three.js, and every frame is a
